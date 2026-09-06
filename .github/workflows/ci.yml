@@ -24,8 +24,8 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Compile sources
-        run: python -m compileall -q backup_bot.py tests
+      - name: Compile all Python sources
+        run: python -m compileall -q .
 
       - name: Run tests
         run: python -m unittest discover -s tests -v
