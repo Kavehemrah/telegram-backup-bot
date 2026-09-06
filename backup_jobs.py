@@ -188,6 +188,8 @@ def pending_files(folder: str, manifest: dict, excluded: set[Path] | None = None
             stat = path.stat()
         except OSError:
             continue
-        if record.get("modified") != stat.st_mtime_ns or record.get("size") != stat.st_size or record.get("deleted"):
+        modified_ok = record.get("modified") == stat.st_mtime_ns
+        size_ok = "size" not in record or record.get("size") == stat.st_size
+        if not modified_ok or not size_ok or record.get("deleted"):
             result.append(path)
     return result
