@@ -9,8 +9,6 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-import requests
-
 from backup_jobs import (
     FOLDERS_FILE,
     JOBS_FILE,
@@ -20,7 +18,6 @@ from backup_jobs import (
     file_key,
     get_or_create_folder,
     load_and_migrate_jobs,
-    load_folders,
     load_manifest,
     load_project,
     new_job,
@@ -32,6 +29,7 @@ from backup_jobs import (
 )
 from telegram_forum import TelegramForum
 
+import requests
 
 BASE_DIR = Path(__file__).resolve().parent
 ENV_FILE = BASE_DIR / ".env"
@@ -101,7 +99,19 @@ def get_changed_files(folder, since):
 
 
 def get_pending_files(folder):
-    return pending_files(folder, {}, STATE_FILES)
+    history = load_history()
+    if not history:
+        return [p for p in current_files(str(folder), STATE_FILES)]
+    sent_versions = {(item.get("path"), item.get("modified")) for item in history}
+    result = []
+    for path in current_files(str(folder), STATE_FILES):
+        try:
+            modified = path.stat().st_mtime_ns
+        except OSError:
+            continue
+        if (str(path), modified) not in sent_versions:
+            result.append(path)
+    return result
 
 
 def telegram_request(token, method, **kwargs):
@@ -147,12 +157,7 @@ def _ensure_project_history_topic(forum, token, chat_id):
     if not chat.get("is_forum"):
         raise RuntimeError("چت مقصد Forum نیست. برای استفاده از Topic باید Topics گروه فعال باشد.")
     topic_id = forum.create_topic(token, chat_id, project.get("history_topic_name") or "Backup History")
-    project.update({
-        "history_chat_id": str(chat_id),
-        "history_topic_id": topic_id,
-        "history_topic_name": project.get("history_topic_name") or "Backup History",
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-    })
+    project.update({"history_chat_id": str(chat_id), "history_topic_id": topic_id, "history_topic_name": project.get("history_topic_name") or "Backup History", "created_at": datetime.now().isoformat(timespec="seconds")})
     save_project(project)
     return topic_id
 
@@ -183,12 +188,7 @@ def _archive_current_version(forum, token, job, record, history_id, log):
         return
     relative = record.get("relative_path", record.get("path", ""))
     version = record.get("version", 1)
-    forum.send_text(
-        token,
-        job["chat_id"],
-        f"📦 نسخه قبلی\nفولدر: {job.get('name', '')}\nفایل: {relative}\nنسخه: {version}\nزمان: {record.get('sent_at', '')}",
-        int(history_id),
-    )
+    forum.send_text(token, job["chat_id"], f"📦 نسخه قبلی\nفولدر: {job.get('name', '')}\nفایل: {relative}\nنسخه: {version}\nزمان: {record.get('sent_at', '')}", int(history_id))
     forum.copy_message(token, job["chat_id"], int(message_id), int(history_id))
     log(f"نسخه قبلی به History منتقل شد: {relative} | v{version}")
 
@@ -200,14 +200,12 @@ def run_job_backup(token, job, log, progress=None, cancel_event=None, selected_f
         folder = Path(job["folder"])
         if not folder.is_dir():
             raise ValueError(f"فولدر معتبر نیست: {folder}")
-
         forum = TelegramForum(telegram_request)
         manifest = load_manifest()
         folder_record = get_or_create_folder(str(folder))
         records = _records_for_folder(manifest, folder_record, job.get("id"))
         destination_thread = None
         history_id = None
-
         if job.get("destination", "topic") == "topic":
             destination_thread, folder_record = _ensure_folder_topic(forum, token, job)
             if job.get("history_enabled", True):
@@ -222,12 +220,12 @@ def run_job_backup(token, job, log, progress=None, cancel_event=None, selected_f
         excluded = STATE_FILES
         all_current = current_files(str(folder), excluded)
         if selected_files is None:
+            pending = pending_files(str(folder), records, excluded)
             if job.get("backup_mode") == "SELECTED":
                 selected_set = {str(Path(p).resolve()) for p in job.get("selected_files", [])}
-                paths = [p for p in all_current if str(p.resolve()) in selected_set]
-                paths = [p for p in paths if pending_files(str(folder), records, excluded) and p in pending_files(str(folder), records, excluded)]
+                paths = [p for p in pending if str(p.resolve()) in selected_set]
             else:
-                paths = pending_files(str(folder), records, excluded)
+                paths = pending
         else:
             paths = [Path(p) for p in selected_files]
         total = len(paths)
@@ -241,8 +239,7 @@ def run_job_backup(token, job, log, progress=None, cancel_event=None, selected_f
             old = records.get(key)
             try:
                 stat = path.stat()
-                modified = stat.st_mtime_ns
-                size = stat.st_size
+                modified, size = stat.st_mtime_ns, stat.st_size
             except OSError:
                 log(f"فایل در دسترس نیست و رد شد: {path}")
                 continue
@@ -255,16 +252,7 @@ def run_job_backup(token, job, log, progress=None, cancel_event=None, selected_f
                     except Exception as error:
                         log(f"حذف نسخه قبلی ممکن نشد: {error}")
             message = forum.send_document(token, job["chat_id"], path, destination_thread)
-            records[key] = {
-                "path": str(path),
-                "relative_path": str(path.relative_to(folder)),
-                "modified": modified,
-                "size": size,
-                "message_id": int(message["message_id"]),
-                "version": int(old.get("version", 0)) + 1 if old else 1,
-                "sent_at": datetime.now().isoformat(timespec="seconds"),
-                "deleted": False,
-            }
+            records[key] = {"path": str(path), "relative_path": str(path.relative_to(folder)), "modified": modified, "size": size, "message_id": int(message["message_id"]), "version": int(old.get("version", 0)) + 1 if old else 1, "sent_at": datetime.now().isoformat(timespec="seconds"), "deleted": False}
             save_manifest(manifest)
             uploaded += 1
             log(f"ارسال شد: {path} | نسخه {records[key]['version']}")
@@ -277,12 +265,7 @@ def run_job_backup(token, job, log, progress=None, cancel_event=None, selected_f
                 continue
             if job.get("history_enabled", True) and history_id:
                 _archive_current_version(forum, token, job, record, history_id, log)
-                forum.send_text(
-                    token,
-                    job["chat_id"],
-                    f"🗑 فایل حذف شد\nفایل: {record.get('relative_path', record.get('path', ''))}\nنسخه {record.get('version', 1)} محفوظ است.",
-                    int(history_id),
-                )
+                forum.send_text(token, job["chat_id"], f"🗑 فایل حذف شد\nفایل: {record.get('relative_path', record.get('path', ''))}\nنسخه {record.get('version', 1)} محفوظ است.", int(history_id))
             if job.get("replace_files", True):
                 try:
                     forum.delete_message(token, job["chat_id"], int(record["message_id"]))
@@ -298,7 +281,6 @@ def run_job_backup(token, job, log, progress=None, cancel_event=None, selected_f
 
 
 def backup_changed_files(token, chat_id, folder, log, progress=None, cancel_event=None, selected_files=None):
-    """Backward-compatible single-folder backup used by the original API/tests."""
     job = new_job(folder, chat_id)
     return run_job_backup(token, job, log, progress, cancel_event, selected_files)
 
@@ -344,17 +326,14 @@ class BackupApp:
         style.configure("Field.TLabel", background="#ffffff", foreground="#627384", font=("Segoe UI", 9))
         style.configure("TButton", padding=(9, 5), font=("Segoe UI", 9))
         style.configure("Accent.TButton", background="#16805f", foreground="#ffffff")
-
         frame = ttk.Frame(self.root, padding=12)
         frame.pack(fill="both", expand=True)
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(2, weight=1)
-
         header = tk.Frame(frame, bg="#18324b", padx=16, pady=10)
         header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         tk.Label(header, text="پشتیبان‌گیری حرفه‌ای تلگرام", bg="#18324b", fg="white", font=("Segoe UI", 14, "bold")).pack(anchor="w")
         tk.Label(header, text="Job مستقل • Topic پایدار • History مرکزی", bg="#18324b", fg="#d9e5ef", font=("Segoe UI", 9)).pack(anchor="w", pady=(3, 0))
-
         connection = ttk.Frame(frame, style="Card.TFrame", padding=10)
         connection.grid(row=1, column=0, sticky="ew")
         connection.columnconfigure(1, weight=1)
@@ -366,12 +345,10 @@ class BackupApp:
         self.chat_combo.grid(row=1, column=1, sticky="ew", pady=(7, 0))
         self.chat_combo.bind("<<ComboboxSelected>>", self.select_chat)
         ttk.Button(connection, text="بارگذاری چت‌ها", command=self.load_chats).grid(row=1, column=2, padx=6, pady=(7, 0))
-
         body = ttk.Frame(frame)
         body.grid(row=2, column=0, sticky="nsew", pady=8)
         body.columnconfigure(1, weight=1)
         body.rowconfigure(0, weight=1)
-
         jobs_card = ttk.Frame(body, style="Card.TFrame", padding=8)
         jobs_card.grid(row=0, column=0, sticky="ns", padx=(0, 8))
         ttk.Label(jobs_card, text="Backup Jobs", style="Section.TLabel").pack(anchor="w")
@@ -381,7 +358,6 @@ class BackupApp:
         ttk.Button(jobs_card, text="＋ پوشه جدید", command=self.new_job_ui).pack(fill="x")
         ttk.Button(jobs_card, text="تغییر وضعیت Pause/Resume", command=self.toggle_job).pack(fill="x", pady=(5, 0))
         ttk.Button(jobs_card, text="حذف Job", command=self.delete_job).pack(fill="x", pady=(5, 0))
-
         editor = ttk.Frame(body, style="Card.TFrame", padding=10)
         editor.grid(row=0, column=1, sticky="nsew")
         editor.columnconfigure(1, weight=1)
@@ -394,7 +370,6 @@ class BackupApp:
         ttk.Label(editor, text="مقصد", style="Field.TLabel").grid(row=5, column=0, sticky="w", pady=4)
         ttk.Combobox(editor, textvariable=self.destination, values=("topic", "general"), state="readonly", width=12).grid(row=5, column=1, sticky="w", pady=4)
         ttk.Checkbutton(editor, text="فعال برای زمان‌بندی", variable=self.enabled).grid(row=6, column=1, sticky="w", pady=4)
-
         options = ttk.Frame(editor, style="Card.TFrame")
         options.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 4))
         ttk.Label(options, text="حالت Backup", style="Field.TLabel").pack(side="left", padx=(0, 8))
@@ -402,7 +377,6 @@ class BackupApp:
         ttk.Radiobutton(options, text="فایل‌های انتخابی", value="SELECTED", variable=self.backup_mode, command=self.refresh_file_list).pack(side="left", padx=10)
         ttk.Checkbutton(options, text="جایگذاری فایل قبلی", variable=self.replace_files).pack(side="left", padx=10)
         ttk.Checkbutton(options, text="History مرکزی", variable=self.history_enabled).pack(side="left")
-
         files_card = ttk.Frame(editor, style="Card.TFrame")
         files_card.grid(row=8, column=0, columnspan=3, sticky="nsew", pady=6)
         editor.rowconfigure(8, weight=1)
@@ -415,14 +389,12 @@ class BackupApp:
         self.file_canvas.configure(yscrollcommand=self.file_scroll.set)
         self.file_canvas.pack(side="left", fill="both", expand=True)
         self.file_scroll.pack(side="right", fill="y")
-
         actions = ttk.Frame(editor, style="Card.TFrame")
         actions.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(7, 0))
         ttk.Button(actions, text="ذخیره Job", command=self.save_current_job).pack(side="left")
         ttk.Button(actions, text="ساخت/اتصال Topic", command=self.prepare_topics_ui).pack(side="left", padx=5)
         ttk.Button(actions, text="ارسال الآن", style="Accent.TButton", command=self.start_backup).pack(side="left")
         ttk.Button(actions, text="لغو عملیات", command=self.stop_scheduler).pack(side="left", padx=5)
-
         activity = ttk.Frame(frame, style="Card.TFrame", padding=10)
         activity.grid(row=3, column=0, sticky="ew")
         activity.columnconfigure(1, weight=1)
@@ -524,20 +496,7 @@ class BackupApp:
         else:
             job = self.jobs[index]
         folder_record = get_or_create_folder(folder)
-        job.update({
-            "name": self.job_name.get().strip() or Path(folder).name,
-            "folder": str(Path(folder).expanduser().resolve()),
-            "folder_id": folder_record["id"],
-            "chat_id": chat_id,
-            "destination": self.destination.get(),
-            "main_topic_name": self.main_topic.get().strip() or Path(folder).name,
-            "schedule": self.schedule.get().strip(),
-            "enabled": self.enabled.get(),
-            "backup_mode": self.backup_mode.get(),
-            "selected_files": selected,
-            "replace_files": self.replace_files.get(),
-            "history_enabled": self.history_enabled.get(),
-        })
+        job.update({"name": self.job_name.get().strip() or Path(folder).name, "folder": str(Path(folder).expanduser().resolve()), "folder_id": folder_record["id"], "chat_id": chat_id, "destination": self.destination.get(), "main_topic_name": self.main_topic.get().strip() or Path(folder).name, "schedule": self.schedule.get().strip(), "enabled": self.enabled.get(), "backup_mode": self.backup_mode.get(), "selected_files": selected, "replace_files": self.replace_files.get(), "history_enabled": self.history_enabled.get()})
         if folder_record.get("topic_id"):
             job["main_topic_id"] = folder_record["topic_id"]
         save_jobs(self.jobs)
@@ -593,8 +552,7 @@ class BackupApp:
             return
         for path in files:
             relative = str(path.relative_to(Path(folder)))
-            value = str(path.resolve()) in selected
-            var = tk.BooleanVar(value=value)
+            var = tk.BooleanVar(value=str(path.resolve()) in selected)
             self.file_vars[str(path)] = var
             ttk.Checkbutton(self.file_inner, text=relative, variable=var).pack(anchor="w", padx=8, pady=2)
         state = "normal" if self.backup_mode.get() == "SELECTED" else "disabled"
