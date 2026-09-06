@@ -1,5 +1,5 @@
 from backup_bot import load_env
-from backup_ui_v2 import BackupApp, apply_style
+from backup_ui_product import BackupApp, apply_style
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
