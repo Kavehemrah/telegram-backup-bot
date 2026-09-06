@@ -44,6 +44,9 @@ class TelegramForum:
         path: Path,
         thread_id: int | None = None,
         caption: str | None = None,
+        *,
+        relative_path: str | None = None,
+        topic_name: str | None = None,
     ) -> dict:
         data = {"chat_id": chat_id}
         if thread_id is not None:
@@ -81,9 +84,10 @@ class TelegramForum:
                 message_id=int(result["message_id"]),
                 file_id=str(file_id),
                 path=str(path),
-                relative_path=path.name,
+                relative_path=relative_path or path.name,
                 size=path.stat().st_size,
                 thread_id=thread_id,
+                topic_name=topic_name,
             )
         return result
 
