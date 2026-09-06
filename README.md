@@ -1,34 +1,33 @@
 # Telegram Folder Backup
 
-A lightweight Windows-friendly desktop utility for backing up files from a local folder to Telegram.
-
-The application provides a simple Tkinter interface for selecting a backup folder, discovering Telegram chats, sending pending files, viewing activity, and running a daily backup schedule.
+A lightweight Windows-friendly desktop utility for backing up multiple local folders to Telegram.
 
 ## Features
 
-- Manual backup of all pending files
-- Selective backup of individual files
-- Incremental backup based on file modification time
-- Daily scheduled backup at a configurable `HH:MM` time
-- Telegram connection test
-- Telegram chat discovery through `getUpdates`
-- Upload progress and activity log
-- Local backup history
-- Configuration stored in `.env`
-- No third-party database required
+- Multiple independent Backup Jobs
+- One local folder per job
+- Manual and daily scheduled backups
+- Selective and incremental backup behavior
+- Telegram chat discovery and connection test
+- Optional `General` destination or dedicated Forum Topic per job
+- Automatic creation of a main Topic and a separate History Topic
+- Versioned backups: when a file changes, the previous Telegram message is copied to History and the current Topic keeps only the latest version
+- Deleted local files are preserved in the History Topic with a deletion record
+- Previous Telegram versions are moved with `copyMessage`; the application does not download and re-upload them
+- Local manifest storing Telegram message IDs and file versions
+- Retry/backoff for transient Telegram/network failures
+- Protection against concurrent backup runs
 
 ## Requirements
 
 - Python 3.10+
 - A Telegram bot token from `@BotFather`
-- A Telegram chat where the bot is allowed to send documents
 - `requests`
+- Tkinter (included with the standard Windows Python distribution)
 
-Tkinter is part of the standard Python distribution on Windows. On Linux, install the platform package provided by your distribution if Tkinter is not already available.
+For Topic mode, the destination must be a Telegram forum supergroup. The bot must have permission to manage topics; it also needs message deletion permission if the main Topic is to contain only the latest versions. Telegram's Bot API supports `createForumTopic`, `message_thread_id`, and `copyMessage`, so historical versions can be copied server-side without downloading the file again.
 
 ## Installation
-
-Clone the repository and create a virtual environment:
 
 ```bash
 git clone https://github.com/Kavehemrah/telegram-backup-bot.git
@@ -36,61 +35,66 @@ cd telegram-backup-bot
 python -m venv .venv
 ```
 
-Activate it on Windows PowerShell:
+Windows PowerShell:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-```
-
-Install dependencies:
-
-```bash
 pip install -r requirements.txt
-```
-
-Copy `.env.example` to `.env`, then fill in the values. The application can also create/update `.env` from its UI.
-
-Run:
-
-```bash
 python backup_bot.py
 ```
 
 ## Configuration
 
-```dotenv
-TELEGRAM_BOT_TOKEN=your_bot_token
-TELEGRAM_CHAT_ID=your_chat_id
-BACKUP_FOLDER=C:\\Backups\\MyProject
-SCHEDULE_TIME=23:00
+The UI manages Backup Jobs. Each job contains:
+
+- folder
+- Telegram chat
+- destination: `topic` or `general`
+- main Topic name
+- History Topic name
+- daily schedule
+- enabled/disabled state
+
+Existing `.env` settings from earlier versions are migrated to a single Backup Job on first launch.
+
+Generated local state is stored in `backup_jobs.json` and `backup_manifest.json`; both are ignored by Git.
+
+## Versioned Topic behavior
+
+For a job configured for Topic mode, the application creates two Topics:
+
+```text
+Finance
+├── invoice.pdf       <- latest version only
+├── salary.xlsx
+└── contract.pdf
+
+Finance History
+├── invoice.pdf       <- previous versions
+├── salary.xlsx
+└── deleted-file.pdf  <- preserved after local deletion
 ```
 
-Do not commit `.env`. It is intentionally ignored by Git.
-
-## How incremental backup works
-
-The application keeps a local `backup_history.json` file. Each successful upload records the file path, its modification timestamp, and the upload time. A file is considered pending again when its modification timestamp changes.
-
-This is intentionally a lightweight local state mechanism rather than a full backup database.
-
-## Telegram chat discovery
-
-The **Load chats** action uses Telegram's `getUpdates` method. To make a chat discoverable, send a message to the bot or otherwise generate an update that contains the target chat, then load the chats again.
-
-For production deployments, a fixed `TELEGRAM_CHAT_ID` is preferable to relying on discovery every time.
+When `invoice.pdf` changes, the previous message is copied to the History Topic using Telegram's `copyMessage` API. The old message in the main Topic is then deleted when the bot has the required permission, and the new local file is uploaded once to the main Topic. The old file bytes are never downloaded to the computer for this transition.
 
 ## Security notes
 
-- Never publish your bot token.
+- Never publish the bot token.
 - Keep `.env` outside version control.
-- Treat `backup_history.json` as local application state; it may contain local file paths.
-- The bot must have permission to send documents to the selected chat.
+- Generated JSON state can contain local file paths and Telegram message IDs.
+- For real access separation, use separate private groups rather than relying on Topic-level permissions; Telegram Topics do not provide independent per-topic member ACLs.
 
 ## Project structure
 
 ```text
 telegram-backup-bot/
 ├── backup_bot.py
+├── backup_jobs.py
+├── telegram_forum.py
+├── tests/
+│   ├── test_backup_state.py
+│   ├── test_forum_and_jobs.py
+│   └── test_telegram_requests.py
 ├── .env.example
 ├── .gitignore
 ├── LICENSE
@@ -98,18 +102,14 @@ telegram-backup-bot/
 └── requirements.txt
 ```
 
-The current application intentionally remains small and dependency-light. The next architectural step is to separate the backup engine, Telegram client, persistence, scheduler, and UI into independent modules without changing user-facing behavior.
+The project intentionally remains small. The backup engine, persistent jobs, Telegram Forum operations, and UI are separated only where the new functionality requires it.
 
 ## Roadmap
 
-- Separate core backup logic from the Tkinter UI
-- Add automated unit tests for backup state and file selection
-- Improve scheduler reliability
-- Prevent concurrent backup jobs
-- Add retry/backoff handling for transient Telegram/network failures
-- Improve handling of renamed or deleted files
-- Add packaging for Windows
-- Add GitHub Actions quality checks
+- Windows packaging (`.exe`)
+- Restore selected file/version from Telegram
+- Better backup reports and retention policies
+- Optional private-group destinations for sensitive jobs
 
 ## License
 

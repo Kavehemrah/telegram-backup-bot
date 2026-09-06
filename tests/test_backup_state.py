@@ -10,14 +10,10 @@ class BackupStateTests(unittest.TestCase):
     def test_history_round_trip(self):
         with tempfile.TemporaryDirectory() as tmp:
             history_file = Path(tmp) / "history.json"
-            with patch.object(backup_bot, "HISTORY_FILE", history_file):
-                history = [
-                    {
-                        "path": "example.txt",
-                        "modified": 123,
-                        "sent_at": "2026-09-06T12:00:00",
-                    }
-                ]
+            with patch.object(backup_bot, "HISTORY_FILE", history_file), patch.object(
+                backup_bot, "STATE_FILES", {backup_bot.LOG_FILE, history_file, backup_bot.JOBS_FILE, backup_bot.MANIFEST_FILE}
+            ):
+                history = [{"path": "example.txt", "modified": 123, "sent_at": "2026-09-06T12:00:00"}]
                 backup_bot.save_history(history)
                 self.assertEqual(backup_bot.load_history(), history)
 
@@ -30,16 +26,9 @@ class BackupStateTests(unittest.TestCase):
             second.write_text("two", encoding="utf-8")
 
             history_file = root / "history.json"
-            with patch.object(backup_bot, "HISTORY_FILE", history_file):
-                backup_bot.save_history(
-                    [
-                        {
-                            "path": str(first),
-                            "modified": first.stat().st_mtime_ns,
-                            "sent_at": "2026-09-06T12:00:00",
-                        }
-                    ]
-                )
+            state_files = {backup_bot.LOG_FILE, history_file, backup_bot.JOBS_FILE, backup_bot.MANIFEST_FILE}
+            with patch.object(backup_bot, "HISTORY_FILE", history_file), patch.object(backup_bot, "STATE_FILES", state_files):
+                backup_bot.save_history([{"path": str(first), "modified": first.stat().st_mtime_ns, "sent_at": "2026-09-06T12:00:00"}])
                 pending = backup_bot.get_pending_files(root)
 
             self.assertEqual(pending, [second])
@@ -52,16 +41,9 @@ class BackupStateTests(unittest.TestCase):
             old_mtime = target.stat().st_mtime_ns
 
             history_file = root / "history.json"
-            with patch.object(backup_bot, "HISTORY_FILE", history_file):
-                backup_bot.save_history(
-                    [
-                        {
-                            "path": str(target),
-                            "modified": old_mtime,
-                            "sent_at": "2026-09-06T12:00:00",
-                        }
-                    ]
-                )
+            state_files = {backup_bot.LOG_FILE, history_file, backup_bot.JOBS_FILE, backup_bot.MANIFEST_FILE}
+            with patch.object(backup_bot, "HISTORY_FILE", history_file), patch.object(backup_bot, "STATE_FILES", state_files):
+                backup_bot.save_history([{"path": str(target), "modified": old_mtime, "sent_at": "2026-09-06T12:00:00"}])
                 target.write_text("version 2", encoding="utf-8")
                 pending = backup_bot.get_pending_files(root)
 
