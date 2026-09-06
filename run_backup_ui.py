@@ -1,10 +1,12 @@
 from backup_bot import load_env
 from backup_ui_product import BackupApp, apply_style
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication
 
 import backup_ui_product
 from backup_bot import load_project, save_project, run_job_backup as _run_job_backup
+from restore_ui import RestoreDialog
 
 
 def _run_job_backup_with_topic_recovery(token, job, log, progress=None, cancel_event=None, selected_files=None):
@@ -28,6 +30,11 @@ def _run_job_backup_with_topic_recovery(token, job, log, progress=None, cancel_e
         return _run_job_backup(token, job, log, progress, cancel_event, selected_files)
 
 
+def open_restore(window: BackupApp) -> None:
+    dialog = RestoreDialog(window.token, window.lang, window)
+    dialog.exec()
+
+
 backup_ui_product.run_job_backup = _run_job_backup_with_topic_recovery
 
 
@@ -37,5 +44,10 @@ if __name__ == "__main__":
     app.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
     apply_style(app)
     window = BackupApp()
+
+    restore_action = QAction("↺ بازیابی" if window.lang == "fa" else "↺ Restore", window)
+    restore_action.triggered.connect(lambda: open_restore(window))
+    window.menuBar().addAction(restore_action)
+
     window.show()
     app.exec()
