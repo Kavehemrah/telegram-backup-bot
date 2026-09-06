@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from backup_jobs import load_folders, normalize_folder
+from backup_jobs import load_folders
 from restore_catalog import record_uploaded_file
 
 
@@ -84,7 +84,6 @@ class TelegramForum:
             derived_topic_name = topic_name
             if derived_relative is None or derived_topic_name is None:
                 try:
-                    normalized_path = normalize_folder(str(path.parent))
                     for folder in load_folders():
                         folder_path = folder.get("path")
                         if not folder_path:
@@ -178,7 +177,11 @@ class TelegramForum:
     ) -> int:
         chat = self.get_chat(token, chat_id)
         if not chat.get("is_forum"):
-            raise RuntimeError(
-                "چت مقصد Forum نیست. برای استفاده از Topic باید Topics گروه فعال باشد."
-            )
-        return int(existing_id) if existing_id else self.create_topic(token, chat_id, name)
+            raise RuntimeError("Telegram chat is not a forum.")
+        if existing_id:
+            try:
+                self.send_text(token, chat_id, "ping", existing_id)
+                return int(existing_id)
+            except RuntimeError:
+                pass
+        return self.create_topic(token, chat_id, name)
