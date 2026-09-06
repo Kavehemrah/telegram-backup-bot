@@ -11,6 +11,7 @@ backup_manifest.json
 backup_folders.json
 backup_project.json
 backup_ui_settings.json
+backup_restore_index.json
 
 # Local backup test folders
 backup-test*/
