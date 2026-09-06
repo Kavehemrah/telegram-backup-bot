@@ -37,7 +37,7 @@ def record_uploaded_file(
         1
         for item in entries
         if str(item.get("chat_id")) == str(chat_id)
-        and str(item.get("relative_path")) == str(relative_path)
+        and str(item.get("path")) == str(path)
     )
     entries.append(
         {
