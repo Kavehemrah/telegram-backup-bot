@@ -31,6 +31,7 @@ def record_uploaded_file(
     relative_path: str,
     size: int,
     thread_id: int | None = None,
+    topic_name: str | None = None,
 ) -> None:
     entries = load_restore_index()
     version = 1 + sum(
@@ -48,6 +49,7 @@ def record_uploaded_file(
             "relative_path": str(relative_path),
             "size": int(size),
             "thread_id": thread_id,
+            "topic_name": topic_name,
             "version": version,
             "uploaded_at": datetime.now().isoformat(timespec="seconds"),
         }
