@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import backup_jobs
 from telegram_forum import TelegramForum
@@ -21,6 +21,30 @@ class TelegramForumTests(unittest.TestCase):
         request.assert_called_once_with("token", "copyMessage", data={
             "chat_id": "-100", "from_chat_id": "-100", "message_id": 12, "message_thread_id": 77,
         })
+
+    def test_send_document_indexes_file_id(self):
+        request = Mock(return_value={
+            "message_id": 123,
+            "document": {"file_id": "FILE123"},
+        })
+        forum = TelegramForum(request)
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "telegram_forum.record_uploaded_file"
+        ) as record:
+            path = Path(directory) / "sample.txt"
+            path.write_text("hello", encoding="utf-8")
+            result = forum.send_document("token", "-100", path, 7)
+
+        self.assertEqual(result["message_id"], 123)
+        record.assert_called_once_with(
+            chat_id="-100",
+            message_id=123,
+            file_id="FILE123",
+            path=str(path),
+            relative_path="sample.txt",
+            size=5,
+            thread_id=7,
+        )
 
 
 class BackupJobTests(unittest.TestCase):
