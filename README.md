@@ -21,7 +21,9 @@ A lightweight Windows-friendly desktop utility for backing up multiple local fol
 - Local manifest storing Telegram message IDs and file versions
 - Retry/backoff for transient Telegram/network failures
 - Protection against concurrent backup runs
-- PySide6 desktop UI with real dialogs for Chat and File selection
+- PySide6 desktop UI with dedicated Chat and File selection dialogs
+- File selection uses real Qt checkboxes for reliable checked-state rendering
+- Changing folder on an existing Job asks whether to edit that Job or create a new Job; cancelling makes no change
 
 ## Requirements
 
@@ -41,7 +43,7 @@ pip install -r requirements.txt
 python run_backup_ui.py
 ```
 
-`run_backup_ui.py` is the recommended desktop entry point. `backup_ui.py` contains the PySide6 interface and `backup_bot.py` contains the backup engine and Telegram operations.
+`run_backup_ui.py` is the recommended desktop entry point. `backup_ui_v2.py` is the current PySide6 interface and `backup_bot.py` contains the backup engine and Telegram operations. `backup_ui.py` remains in the repository as the previous PySide6 UI implementation.
 
 ## Job configuration
 
@@ -59,6 +61,8 @@ Each Backup Job stores:
 - `History`
 
 Deleting a Job does not delete its Folder Identity, manifest, or Telegram Topic. Creating a new Job for the same folder finds that identity and reuses its Topic ID.
+
+Selecting a different folder while an existing Job is selected no longer silently changes that Job. The UI asks whether to edit the selected Job, create a new Job, or cancel. The new Job path is used only after the explicit `ساخت Job جدید` choice.
 
 ## Topic behavior
 
@@ -90,7 +94,7 @@ The two switches are independent. Replace can be disabled while History remains 
 
 ## Selective backup
 
-Choose `فایل‌های انتخابی` and use `انتخاب / مدیریت فایل‌ها`. A dedicated Qt dialog provides search, checkboxes, Select All, Clear All and an explicit confirmation button. The selection is stored with that Job. A new file appearing later is not included until it is explicitly selected.
+Choose `فایل‌های انتخابی` and use `انتخاب / مدیریت فایل‌ها`. A dedicated Qt dialog provides search, visible checkboxes, Select All, Clear All and explicit confirmation. The selection is stored with that Job. A new file appearing later is not included until it is explicitly selected.
 
 ## Telegram chat selection
 
@@ -118,6 +122,7 @@ telegram-backup-bot/
 ├── backup_bot.py
 ├── backup_jobs.py
 ├── backup_ui.py
+├── backup_ui_v2.py
 ├── run_backup_ui.py
 ├── telegram_forum.py
 ├── tests/
