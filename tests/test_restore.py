@@ -1,8 +1,7 @@
-import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import restore
 import restore_catalog
@@ -28,6 +27,7 @@ class RestoreCatalogTests(unittest.TestCase):
         self.assertEqual(entries[0]["file_id"], "FILE123")
         self.assertEqual(entries[0]["message_id"], 12)
         self.assertEqual(entries[0]["relative_path"], "a.txt")
+        self.assertEqual(entries[0]["version"], 1)
 
     def test_corrupt_catalog_is_ignored(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.object(
@@ -41,15 +41,13 @@ class RestoreFileTests(unittest.TestCase):
     def test_restore_downloads_file_atomically(self):
         entry = {"file_id": "FILE123", "relative_path": "folder/a.txt"}
         telegram_file = {"file_path": "documents/file.bin", "file_size": 4}
-        response = Mock()
+        response = MagicMock()
         response.headers = {"Content-Length": "4"}
         response.iter_content.return_value = [b"test"]
 
         with tempfile.TemporaryDirectory() as temp_dir, patch.object(
             restore, "telegram_request", return_value=telegram_file
         ) as request, patch.object(restore.requests, "get", return_value=response):
-            response.__enter__.return_value = response
-            response.__exit__.return_value = False
             output = restore.restore_file("TOKEN", entry, temp_dir)
             self.assertEqual(output.read_bytes(), b"test")
             request.assert_called_once_with("TOKEN", "getFile", data={"file_id": "FILE123"})
