@@ -2,10 +2,38 @@ from __future__ import annotations
 
 import os
 import threading
-import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+
+from PySide6.QtCore import QObject, QThread, Qt, Signal
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMessageBox,
+    QPlainTextEdit,
+    QProgressBar,
+    QPushButton,
+    QRadioButton,
+    QScrollArea,
+    QSplitter,
+    QSpinBox,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from backup_bot import (
     STATE_FILES,
@@ -20,600 +48,781 @@ from backup_jobs import (
     load_and_migrate_jobs,
     load_manifest,
     new_job,
-    pending_files,
     save_jobs,
 )
 from telegram_forum import TelegramForum
 
 
-class BackupApp:
-    """Desktop UI for managing independent backup jobs.
+class _Worker(QThread):
+    progress = Signal(int)
+    log = Signal(str)
+    success = Signal(object)
+    failure = Signal(str)
 
-    The UI deliberately keeps destructive actions visible and keeps file
-    selection in a dedicated dialog instead of squeezing dozens of checkboxes
-    into the main editor.
-    """
-
-    def __init__(self, root: tk.Tk):
-        self.root = root
-        self.root.title("Telegram Folder Backup")
-        self.root.geometry("1240x820")
-        self.root.minsize(1050, 700)
-        self.root.configure(bg="#eef2f5")
-
-        self.jobs = load_and_migrate_jobs()
-        self.chats: dict[str, str] = {}
-        self.file_vars: dict[str, tk.BooleanVar] = {}
-        self.worker: threading.Thread | None = None
-        self.scheduler_thread: threading.Thread | None = None
-        self.stop_event = threading.Event()
+    def __init__(self, token, job, selected_files=None):
+        super().__init__()
+        self.token = token
+        self.job = job
+        self.selected_files = selected_files
         self.cancel_event = threading.Event()
 
-        self.token = tk.StringVar(value=os.getenv("TELEGRAM_BOT_TOKEN", ""))
-        self.chat_id = tk.StringVar(value=os.getenv("TELEGRAM_CHAT_ID", ""))
-        self.job_name = tk.StringVar()
-        self.folder = tk.StringVar()
-        self.main_topic = tk.StringVar()
-        self.schedule = tk.StringVar(value="23:00")
-        self.enabled = tk.BooleanVar(value=True)
-        self.destination = tk.StringVar(value="topic")
-        self.backup_mode = tk.StringVar(value="ALL")
-        self.replace_files = tk.BooleanVar(value=True)
-        self.history_enabled = tk.BooleanVar(value=True)
-        self.file_summary = tk.StringVar(value="فایلی انتخاب نشده")
-        self.status = tk.StringVar(value="آماده")
-        self.progress = tk.DoubleVar(value=0)
+    def run(self):
+        try:
+            count, completed = run_job_backup(
+                self.token,
+                self.job,
+                self.log.emit,
+                lambda current, total: self.progress.emit(int(current / total * 100) if total else 100),
+                self.cancel_event,
+                self.selected_files,
+            )
+            self.success.emit((count, completed, self.job))
+        except Exception as exc:
+            self.failure.emit(str(exc))
 
-        self._configure_styles()
+    def cancel(self):
+        self.cancel_event.set()
+
+
+class _ChatLoader(QThread):
+    loaded = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, token):
+        super().__init__()
+        self.token = token
+
+    def run(self):
+        try:
+            updates = telegram_request(self.token, "getUpdates")
+            chats = {}
+            for update in updates:
+                message = update.get("message") or update.get("channel_post") or {}
+                chat = message.get("chat") or {}
+                if chat.get("id") is None:
+                    continue
+                title = chat.get("title") or chat.get("first_name") or "بدون نام"
+                key = str(chat["id"])
+                chats[key] = f"{title}   ({key})"
+            self.loaded.emit(chats)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ChatPicker(QDialog):
+    def __init__(self, chats: dict[str, str], current_id: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("انتخاب چت Telegram")
+        self.resize(620, 520)
+        self.selected_id = current_id
+        layout = QVBoxLayout(self)
+        title = QLabel("چت مقصد را انتخاب کنید")
+        title.setObjectName("dialogTitle")
+        layout.addWidget(title)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("جست‌وجوی نام یا Chat ID ...")
+        layout.addWidget(self.search)
+        self.list = QListWidget()
+        self.list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        layout.addWidget(self.list, 1)
+        for chat_id, label in chats.items():
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, chat_id)
+            self.list.addItem(item)
+            if str(chat_id) == str(current_id):
+                self.list.setCurrentItem(item)
+        self.search.textChanged.connect(self._filter)
+        self.list.itemDoubleClicked.connect(self._accept_item)
+        self.count = QLabel(f"{len(chats)} چت")
+        layout.addWidget(self.count)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
+        buttons.accepted.connect(self._accept_item)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _filter(self, text: str):
+        query = text.strip().casefold()
+        visible = 0
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            show = not query or query in item.text().casefold()
+            item.setHidden(not show)
+            visible += int(show)
+        self.count.setText(f"{visible} چت نمایش داده شد")
+
+    def _accept_item(self, *_):
+        item = self.list.currentItem()
+        if not item or item.isHidden():
+            QMessageBox.warning(self, "انتخاب چت", "یک چت را انتخاب کنید.")
+            return
+        self.selected_id = str(item.data(Qt.ItemDataRole.UserRole))
+        self.accept()
+
+
+class FilePicker(QDialog):
+    def __init__(self, files: list[Path], selected: set[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("انتخاب فایل‌های Backup")
+        self.resize(850, 650)
+        self.files = files
+        self.selected = set(selected)
+        layout = QVBoxLayout(self)
+        title = QLabel("فقط فایل‌هایی که تیک دارند در حالت «فایل‌های انتخابی» Backup می‌شوند.")
+        title.setObjectName("dialogTitle")
+        layout.addWidget(title)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("جست‌وجو در نام یا مسیر فایل ...")
+        layout.addWidget(self.search)
+        self.list = QListWidget()
+        self.list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        layout.addWidget(self.list, 1)
+        for path in files:
+            full = str(path.resolve())
+            item = QListWidgetItem(str(path.relative_to(Path(files[0]).anchor)) if False else str(path))
+            item.setData(Qt.ItemDataRole.UserRole, full)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if full in self.selected else Qt.CheckState.Unchecked)
+            self.list.addItem(item)
+        self.search.textChanged.connect(self._filter)
+        self.list.itemChanged.connect(self._count)
+        self.count = QLabel()
+        layout.addWidget(self.count)
+        tools = QHBoxLayout()
+        all_btn = QPushButton("انتخاب همه")
+        none_btn = QPushButton("پاک کردن همه")
+        all_btn.clicked.connect(lambda: self._set_all(True))
+        none_btn.clicked.connect(lambda: self._set_all(False))
+        tools.addWidget(all_btn)
+        tools.addWidget(none_btn)
+        tools.addStretch()
+        layout.addLayout(tools)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._count()
+
+    def _filter(self, text: str):
+        query = text.strip().casefold()
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            item.setHidden(bool(query) and query not in item.text().casefold())
+
+    def _set_all(self, value: bool):
+        self.list.blockSignals(True)
+        state = Qt.CheckState.Checked if value else Qt.CheckState.Unchecked
+        for i in range(self.list.count()):
+            self.list.item(i).setCheckState(state)
+        self.list.blockSignals(False)
+        self._count()
+
+    def _count(self, *_):
+        total = 0
+        for i in range(self.list.count()):
+            total += int(self.list.item(i).checkState() == Qt.CheckState.Checked)
+        self.count.setText(f"{total} فایل انتخاب شده از {self.list.count()}")
+
+    def _accept(self):
+        self.selected = {
+            str(self.list.item(i).data(Qt.ItemDataRole.UserRole))
+            for i in range(self.list.count())
+            if self.list.item(i).checkState() == Qt.CheckState.Checked
+        }
+        self.accept()
+
+
+class BackupApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Telegram Folder Backup")
+        self.resize(1280, 820)
+        self.setMinimumSize(1080, 700)
+        self.jobs = load_and_migrate_jobs()
+        self.chats: dict[str, str] = {}
+        self.worker: _Worker | None = None
+        self.chat_loader: _ChatLoader | None = None
+        self.scheduler_thread: threading.Thread | None = None
+        self.scheduler_stop = threading.Event()
+        self.token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        self._new_job = False
         self._build_ui()
-        self.refresh_jobs()
-
-    def _configure_styles(self):
-        style = ttk.Style(self.root)
-        style.theme_use("clam")
-        style.configure("TFrame", background="#eef2f5")
-        style.configure("Card.TFrame", background="#ffffff")
-        style.configure("TLabel", background="#ffffff", foreground="#243746", font=("Segoe UI", 10))
-        style.configure("Title.TLabel", background="#ffffff", foreground="#17324d", font=("Segoe UI", 12, "bold"))
-        style.configure("Muted.TLabel", background="#ffffff", foreground="#687887", font=("Segoe UI", 9))
-        style.configure("Header.TLabel", background="#17324d", foreground="#ffffff", font=("Segoe UI", 17, "bold"))
-        style.configure("HeaderSub.TLabel", background="#17324d", foreground="#d9e5ef", font=("Segoe UI", 9))
-        style.configure("TButton", padding=(12, 8), font=("Segoe UI", 9))
-        style.configure("Primary.TButton", padding=(14, 9), font=("Segoe UI", 9, "bold"))
-        style.configure("Danger.TButton", padding=(12, 8), font=("Segoe UI", 9, "bold"))
-        style.configure("Treeview", rowheight=34, font=("Segoe UI", 9))
-        style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"))
-        style.configure("TLabelframe", background="#ffffff")
-        style.configure("TLabelframe.Label", background="#ffffff", foreground="#17324d", font=("Segoe UI", 10, "bold"))
+        self._load_jobs()
 
     def _build_ui(self):
-        outer = ttk.Frame(self.root, padding=14)
-        outer.pack(fill="both", expand=True)
-        outer.columnconfigure(0, weight=0)
-        outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(1, weight=1)
+        central = QWidget()
+        root = QVBoxLayout(central)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(12)
+        self.setCentralWidget(central)
 
-        header = tk.Frame(outer, bg="#17324d", height=78)
-        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
-        header.grid_propagate(False)
-        ttk.Label(header, text="پشتیبان‌گیری تلگرام", style="Header.TLabel").pack(anchor="w", padx=18, pady=(13, 0))
-        ttk.Label(header, text="مدیریت Job مستقل • Topic پایدار • History مرکزی", style="HeaderSub.TLabel").pack(anchor="w", padx=18, pady=(2, 0))
+        header = QFrame()
+        header.setObjectName("header")
+        h = QHBoxLayout(header)
+        h.setContentsMargins(18, 14, 18, 14)
+        title_box = QVBoxLayout()
+        title = QLabel("پشتیبان‌گیری تلگرام")
+        title.setObjectName("headerTitle")
+        subtitle = QLabel("مدیریت Job مستقل • Topic پایدار • History مرکزی")
+        subtitle.setObjectName("headerSubtitle")
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
+        h.addLayout(title_box)
+        h.addStretch()
+        root.addWidget(header)
 
-        self._build_sidebar(outer)
-        self._build_editor(outer)
-        self._build_statusbar(outer)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        root.addWidget(splitter, 1)
+        splitter.setSizes([330, 900])
 
-    def _build_sidebar(self, parent):
-        card = ttk.Frame(parent, style="Card.TFrame", padding=12)
-        card.grid(row=1, column=0, sticky="ns", padx=(0, 10))
-        card.rowconfigure(2, weight=1)
-        ttk.Label(card, text="Backup Jobs", style="Title.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(card, text="هر Job وضعیت و تنظیمات مستقل دارد.", style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 8))
+        splitter.addWidget(self._build_jobs_panel())
+        splitter.addWidget(self._build_editor_panel())
 
-        tree_frame = ttk.Frame(card, style="Card.TFrame")
-        tree_frame.grid(row=2, column=0, sticky="nsew")
-        tree_frame.rowconfigure(0, weight=1)
-        tree_frame.columnconfigure(0, weight=1)
-        self.jobs_tree = ttk.Treeview(tree_frame, columns=("status", "schedule"), show="tree headings", selectmode="browse", height=20)
-        self.jobs_tree.heading("#0", text="Job / Folder")
-        self.jobs_tree.heading("status", text="وضعیت")
-        self.jobs_tree.heading("schedule", text="زمان")
-        self.jobs_tree.column("#0", width=205, minwidth=165, stretch=True)
-        self.jobs_tree.column("status", width=75, anchor="center", stretch=False)
-        self.jobs_tree.column("schedule", width=60, anchor="center", stretch=False)
-        scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.jobs_tree.yview)
-        self.jobs_tree.configure(yscrollcommand=scroll.set)
-        self.jobs_tree.grid(row=0, column=0, sticky="nsew")
-        scroll.grid(row=0, column=1, sticky="ns")
-        self.jobs_tree.bind("<<TreeviewSelect>>", self.select_job)
+        status = QFrame()
+        sh = QHBoxLayout(status)
+        sh.setContentsMargins(10, 7, 10, 7)
+        self.status_label = QLabel("آماده")
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setTextVisible(False)
+        self.progress.setMinimumWidth(260)
+        self.progress.setMaximumWidth(420)
+        sh.addWidget(self.status_label, 1)
+        sh.addWidget(self.progress)
+        root.addWidget(status)
 
-        buttons = ttk.Frame(card, style="Card.TFrame")
-        buttons.grid(row=3, column=0, sticky="ew", pady=(10, 0))
-        buttons.columnconfigure(0, weight=1)
-        buttons.columnconfigure(1, weight=1)
-        buttons.columnconfigure(2, weight=1)
-        ttk.Button(buttons, text="＋ Job جدید", command=self.new_job_ui).grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        ttk.Button(buttons, text="Pause / Resume", command=self.toggle_job).grid(row=0, column=1, sticky="ew", padx=4)
-        ttk.Button(buttons, text="حذف Job", command=self.delete_job).grid(row=0, column=2, sticky="ew", padx=(4, 0))
-        ttk.Label(card, text="حذف Job فقط Job را حذف می‌کند؛ Folder Identity و Topic باقی می‌مانند.", style="Muted.TLabel", wraplength=340).grid(row=4, column=0, sticky="w", pady=(8, 0))
+    def _build_jobs_panel(self):
+        frame = QFrame()
+        frame.setObjectName("card")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(14, 14, 14, 14)
+        title = QLabel("Backup Jobs")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+        info = QLabel("هر Job مستقل است. حذف Job، Folder Identity و Topic را حذف نمی‌کند.")
+        info.setWordWrap(True)
+        info.setObjectName("muted")
+        layout.addWidget(info)
 
-    def _build_editor(self, parent):
-        editor = ttk.Frame(parent, style="Card.TFrame", padding=16)
-        editor.grid(row=1, column=1, sticky="nsew")
-        editor.columnconfigure(1, weight=1)
-        editor.rowconfigure(4, weight=1)
+        self.jobs_list = QListWidget()
+        self.jobs_list.setAlternatingRowColors(True)
+        self.jobs_list.currentRowChanged.connect(self._select_job)
+        layout.addWidget(self.jobs_list, 1)
 
-        ttk.Label(editor, text="تنظیمات Job", style="Title.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
+        row = QHBoxLayout()
+        new_btn = QPushButton("＋ Job جدید")
+        pause_btn = QPushButton("Pause / Resume")
+        delete_btn = QPushButton("حذف Job")
+        delete_btn.setObjectName("danger")
+        new_btn.clicked.connect(self.new_job)
+        pause_btn.clicked.connect(self.toggle_job)
+        delete_btn.clicked.connect(self.delete_job)
+        row.addWidget(new_btn)
+        row.addWidget(pause_btn)
+        row.addWidget(delete_btn)
+        layout.addLayout(row)
+        return frame
 
-        form = ttk.Frame(editor, style="Card.TFrame")
-        form.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(10, 6))
-        form.columnconfigure(1, weight=1)
-        form.columnconfigure(3, weight=1)
-        self._field(form, 0, 0, "نام Job", self.job_name)
-        self._field(form, 0, 2, "زمان روزانه", self.schedule)
-        self._field(form, 1, 0, "فولدر", self.folder, button=("انتخاب فولدر", self.choose_folder))
-        self._field(form, 1, 2, "نام Topic", self.main_topic)
-        self._field(form, 2, 0, "چت مقصد", self.chat_id)
-        ttk.Button(form, text="بارگذاری چت‌ها", command=self.load_chats).grid(row=2, column=3, sticky="e", padx=(6, 0))
+    def _build_editor_panel(self):
+        panel = QFrame()
+        panel.setObjectName("card")
+        root = QVBoxLayout(panel)
+        root.setContentsMargins(18, 18, 18, 18)
+        title = QLabel("تنظیمات Job")
+        title.setObjectName("sectionTitle")
+        root.addWidget(title)
 
-        options = ttk.LabelFrame(editor, text="رفتار Backup", padding=10)
-        options.grid(row=2, column=0, columnspan=3, sticky="ew", pady=6)
-        ttk.Radiobutton(options, text="کل فولدر", value="ALL", variable=self.backup_mode, command=self.update_file_area).pack(side="left", padx=(0, 14))
-        ttk.Radiobutton(options, text="فایل‌های انتخابی", value="SELECTED", variable=self.backup_mode, command=self.update_file_area).pack(side="left", padx=(0, 18))
-        ttk.Checkbutton(options, text="جایگذاری نسخه قبلی", variable=self.replace_files).pack(side="left", padx=(0, 18))
-        ttk.Checkbutton(options, text="History مرکزی", variable=self.history_enabled).pack(side="left", padx=(0, 18))
-        ttk.Checkbutton(options, text="فعال برای Scheduler", variable=self.enabled).pack(side="left")
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(10)
+        self.name_edit = QLineEdit()
+        self.schedule_edit = QLineEdit("23:00")
+        self.folder_edit = QLineEdit()
+        self.folder_edit.setReadOnly(True)
+        choose_folder = QPushButton("انتخاب فولدر")
+        choose_folder.clicked.connect(self.choose_folder)
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(self.folder_edit, 1)
+        folder_row.addWidget(choose_folder)
+        self.topic_edit = QLineEdit()
+        self.chat_edit = QLineEdit()
+        self.chat_edit.setPlaceholderText("مثلاً -1001234567890")
+        self.load_chats_btn = QPushButton("بارگذاری چت‌ها")
+        self.load_chats_btn.clicked.connect(self.load_chats)
+        chat_row = QHBoxLayout()
+        chat_row.addWidget(self.chat_edit, 1)
+        chat_row.addWidget(self.load_chats_btn)
+        form.addRow("نام Job", self.name_edit)
+        form.addRow("زمان روزانه", self.schedule_edit)
+        form.addRow("فولدر", folder_row)
+        form.addRow("نام Topic", self.topic_edit)
+        form.addRow("Chat ID", chat_row)
+        root.addLayout(form)
 
-        files = ttk.LabelFrame(editor, text="فایل‌های Backup", padding=12)
-        files.grid(row=3, column=0, columnspan=3, sticky="ew", pady=6)
-        files.columnconfigure(0, weight=1)
-        ttk.Label(files, textvariable=self.file_summary, style="Muted.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Button(files, text="انتخاب / مدیریت فایل‌ها", command=self.open_file_selector).grid(row=0, column=1, padx=(10, 0))
-        ttk.Button(files, text="انتخاب همه", command=lambda: self.set_all_selected(True)).grid(row=0, column=2, padx=(6, 0))
-        ttk.Button(files, text="پاک کردن انتخاب‌ها", command=lambda: self.set_all_selected(False)).grid(row=0, column=3, padx=(6, 0))
+        behavior = QFrame()
+        behavior.setObjectName("softCard")
+        bv = QVBoxLayout(behavior)
+        bv.setContentsMargins(12, 10, 12, 10)
+        lbl = QLabel("رفتار Backup")
+        lbl.setObjectName("subTitle")
+        bv.addWidget(lbl)
+        mode = QHBoxLayout()
+        self.all_radio = QRadioButton("کل فولدر")
+        self.selected_radio = QRadioButton("فایل‌های انتخابی")
+        self.all_radio.setChecked(True)
+        self.all_radio.toggled.connect(self._update_file_area)
+        mode.addWidget(self.all_radio)
+        mode.addWidget(self.selected_radio)
+        mode.addStretch()
+        bv.addLayout(mode)
+        checks = QHBoxLayout()
+        self.replace_check = QCheckBox("جایگذاری نسخه قبلی")
+        self.history_check = QCheckBox("History مرکزی")
+        self.enabled_check = QCheckBox("فعال برای Scheduler")
+        self.replace_check.setChecked(True)
+        self.history_check.setChecked(True)
+        self.enabled_check.setChecked(True)
+        checks.addWidget(self.replace_check)
+        checks.addWidget(self.history_check)
+        checks.addWidget(self.enabled_check)
+        checks.addStretch()
+        bv.addLayout(checks)
+        root.addWidget(behavior)
 
-        info = ttk.Frame(editor, style="Card.TFrame")
-        info.grid(row=4, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
-        info.columnconfigure(0, weight=1)
-        info.rowconfigure(0, weight=1)
-        self.preview = tk.Text(info, height=9, state="disabled", wrap="word", relief="flat", bg="#f7f9fb", padx=10, pady=8, font=("Consolas", 9))
-        self.preview.grid(row=0, column=0, sticky="nsew")
+        files_box = QFrame()
+        files_box.setObjectName("softCard")
+        fv = QVBoxLayout(files_box)
+        fv.setContentsMargins(12, 10, 12, 10)
+        head = QHBoxLayout()
+        self.file_summary = QLabel("ابتدا فولدر را انتخاب کنید")
+        self.file_summary.setObjectName("muted")
+        head.addWidget(self.file_summary, 1)
+        manage = QPushButton("انتخاب / مدیریت فایل‌ها")
+        manage.clicked.connect(self.open_file_selector)
+        all_files = QPushButton("انتخاب همه")
+        all_files.clicked.connect(lambda: self.set_all_selected(True))
+        clear_files = QPushButton("پاک کردن انتخاب‌ها")
+        clear_files.clicked.connect(lambda: self.set_all_selected(False))
+        head.addWidget(manage)
+        head.addWidget(all_files)
+        head.addWidget(clear_files)
+        fv.addLayout(head)
 
-        actions = ttk.Frame(editor, style="Card.TFrame")
-        actions.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(12, 0))
-        ttk.Button(actions, text="ذخیره تغییرات", command=self.save_current_job).pack(side="left")
-        ttk.Button(actions, text="ساخت / اتصال Topic", command=self.prepare_topics_ui).pack(side="left", padx=6)
-        ttk.Button(actions, text="▶  اجرای همین Job", style="Primary.TButton", command=self.start_backup).pack(side="left", padx=6)
-        ttk.Button(actions, text="توقف", command=self.stop_scheduler).pack(side="left")
-        ttk.Button(actions, text="شروع Scheduler همه Jobهای فعال", command=self.start_scheduler).pack(side="right")
+        self.preview = QPlainTextEdit()
+        self.preview.setReadOnly(True)
+        self.preview.setMinimumHeight(160)
+        fv.addWidget(self.preview)
+        root.addWidget(files_box, 1)
 
-    def _field(self, parent, row, label_col, label, variable, button=None):
-        ttk.Label(parent, text=label, style="Muted.TLabel").grid(row=row, column=label_col, sticky="w", padx=(0, 8), pady=5)
-        entry_col = label_col + 1
-        ttk.Entry(parent, textvariable=variable).grid(row=row, column=entry_col, sticky="ew", pady=5)
-        if button:
-            ttk.Button(parent, text=button[0], command=button[1]).grid(row=row, column=entry_col + 1, padx=(6, 0), pady=5)
+        actions = QHBoxLayout()
+        save = QPushButton("ذخیره تغییرات")
+        topic = QPushButton("ساخت / اتصال Topic")
+        run = QPushButton("▶ اجرای همین Job")
+        run.setObjectName("primary")
+        stop = QPushButton("توقف")
+        scheduler = QPushButton("شروع Scheduler همه Jobهای فعال")
+        save.clicked.connect(self.save_current_job)
+        topic.clicked.connect(self.prepare_topics_ui)
+        run.clicked.connect(self.start_backup)
+        stop.clicked.connect(self.stop_all)
+        scheduler.clicked.connect(self.start_scheduler)
+        actions.addWidget(save)
+        actions.addWidget(topic)
+        actions.addWidget(run)
+        actions.addWidget(stop)
+        actions.addStretch()
+        actions.addWidget(scheduler)
+        root.addLayout(actions)
+        return panel
 
-    def _build_statusbar(self, parent):
-        bar = ttk.Frame(parent, style="Card.TFrame", padding=(12, 8))
-        bar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        bar.columnconfigure(1, weight=1)
-        ttk.Label(bar, text="وضعیت:", style="Muted.TLabel").grid(row=0, column=0, padx=(0, 8))
-        ttk.Label(bar, textvariable=self.status).grid(row=0, column=1, sticky="w")
-        ttk.Progressbar(bar, variable=self.progress, maximum=100).grid(row=0, column=2, sticky="ew", padx=12)
-
-    def refresh_jobs(self, select_index=None):
-        for item in self.jobs_tree.get_children():
-            self.jobs_tree.delete(item)
-        for index, job in enumerate(self.jobs):
-            status = "فعال" if job.get("enabled", True) else "Pause"
-            folder = Path(job.get("folder", "")).name or job.get("name", "Job")
-            self.jobs_tree.insert("", "end", iid=str(index), text=f"{job.get('name', folder)}\n{folder}", values=(status, job.get("schedule", "23:00")))
+    def _load_jobs(self):
+        self.jobs_list.blockSignals(True)
+        self.jobs_list.clear()
+        for job in self.jobs:
+            folder = Path(job.get("folder", "")).name or "بدون فولدر"
+            state = "فعال" if job.get("enabled", True) else "Pause"
+            item = QListWidgetItem(f"{job.get('name', folder)}\n{folder}   •   {state}   •   {job.get('schedule', '23:00')}")
+            item.setToolTip(job.get("folder", ""))
+            self.jobs_list.addItem(item)
+        self.jobs_list.blockSignals(False)
         if self.jobs:
-            index = 0 if select_index is None else min(select_index, len(self.jobs) - 1)
-            self.jobs_tree.selection_set(str(index))
-            self.jobs_tree.focus(str(index))
-            self.select_job()
+            self.jobs_list.setCurrentRow(0)
         else:
-            self.new_job_ui()
+            self.new_job()
 
-    def _selected_index(self):
-        selected = self.jobs_tree.selection()
-        if not selected:
-            return None
-        try:
-            return int(selected[0])
-        except ValueError:
-            return None
+    def _select_job(self, row: int):
+        if row < 0 or row >= len(self.jobs):
+            return
+        job = self.jobs[row]
+        self._new_job = False
+        self.name_edit.setText(job.get("name", ""))
+        self.folder_edit.setText(job.get("folder", ""))
+        self.topic_edit.setText(job.get("main_topic_name", job.get("name", "")))
+        self.chat_edit.setText(str(job.get("chat_id", "")))
+        self.schedule_edit.setText(job.get("schedule", "23:00"))
+        self.enabled_check.setChecked(job.get("enabled", True))
+        self.replace_check.setChecked(job.get("replace_files", True))
+        self.history_check.setChecked(job.get("history_enabled", True))
+        if job.get("backup_mode", "ALL") == "SELECTED":
+            self.selected_radio.setChecked(True)
+        else:
+            self.all_radio.setChecked(True)
+        self._update_file_area()
+        self.status_label.setText(f"Job انتخاب شد: {job.get('name', 'Job')}")
+
+    def _current_index(self):
+        row = self.jobs_list.currentRow()
+        return row if row >= 0 and row < len(self.jobs) else None
 
     def _current_job(self):
-        index = self._selected_index()
-        return self.jobs[index] if index is not None and index < len(self.jobs) else None
+        row = self._current_index()
+        return self.jobs[row] if row is not None else None
 
-    def new_job_ui(self):
-        self.jobs_tree.selection_remove(self.jobs_tree.selection())
-        self.job_name.set("")
-        self.folder.set("")
-        self.main_topic.set("")
-        self.schedule.set("23:00")
-        self.destination.set("topic")
-        self.chat_id.set(self.chat_id.get())
-        self.enabled.set(True)
-        self.backup_mode.set("ALL")
-        self.replace_files.set(True)
-        self.history_enabled.set(True)
-        self.file_vars = {}
-        self.file_summary.set("ابتدا فولدر را انتخاب کنید")
-        self._set_preview([])
-        self.status.set("Job جدید آماده است")
-
-    def select_job(self, _event=None):
-        job = self._current_job()
-        if not job:
-            return
-        self.job_name.set(job.get("name", ""))
-        self.folder.set(job.get("folder", ""))
-        self.chat_id.set(str(job.get("chat_id", self.chat_id.get())))
-        self.main_topic.set(job.get("main_topic_name", job.get("name", "")))
-        self.schedule.set(job.get("schedule", "23:00"))
-        self.enabled.set(job.get("enabled", True))
-        self.destination.set(job.get("destination", "topic"))
-        self.backup_mode.set(job.get("backup_mode", "ALL"))
-        self.replace_files.set(job.get("replace_files", True))
-        self.history_enabled.set(job.get("history_enabled", True))
-        self.update_file_area()
-        self.status.set(f"Job انتخاب شد: {job.get('name', 'Job')}")
+    def new_job(self):
+        self.jobs_list.blockSignals(True)
+        self.jobs_list.clearSelection()
+        self.jobs_list.blockSignals(False)
+        self._new_job = True
+        self.name_edit.clear()
+        self.folder_edit.clear()
+        self.topic_edit.clear()
+        self.schedule_edit.setText("23:00")
+        self.chat_edit.setText(self.chat_edit.text() or os.getenv("TELEGRAM_CHAT_ID", ""))
+        self.all_radio.setChecked(True)
+        self.replace_check.setChecked(True)
+        self.history_check.setChecked(True)
+        self.enabled_check.setChecked(True)
+        self.file_summary.setText("ابتدا فولدر را انتخاب کنید")
+        self.preview.clear()
+        self.status_label.setText("Job جدید آماده است")
 
     def choose_folder(self):
-        selected = filedialog.askdirectory(title="انتخاب فولدر پشتیبان")
-        if not selected:
+        folder = QFileDialog.getExistingDirectory(self, "انتخاب فولدر پشتیبان")
+        if not folder:
             return
-        self.folder.set(str(Path(selected).resolve()))
-        if not self.job_name.get().strip():
-            self.job_name.set(Path(selected).name)
-        if not self.main_topic.get().strip():
-            self.main_topic.set(Path(selected).name)
-        self.update_file_area()
+        path = str(Path(folder).resolve())
+        self.folder_edit.setText(path)
+        if not self.name_edit.text().strip():
+            self.name_edit.setText(Path(path).name)
+        if not self.topic_edit.text().strip():
+            self.topic_edit.setText(Path(path).name)
+        self._update_file_area()
 
-    def update_file_area(self):
-        folder = self.folder.get().strip()
-        if not folder or not Path(folder).is_dir():
-            self.file_summary.set("فولدر معتبر نیست")
-            self._set_preview([])
-            return
+    def _selected_files_for_job(self):
         job = self._current_job()
-        selected = set(job.get("selected_files", [])) if job else set()
-        files = current_files(folder, STATE_FILES)
-        self.file_vars = {}
-        for path in files:
-            self.file_vars[str(path)] = tk.BooleanVar(value=str(path.resolve()) in selected)
-        if self.backup_mode.get() == "ALL":
-            self.file_summary.set(f"کل فولدر • {len(files)} فایل موجود")
-        else:
-            count = sum(var.get() for var in self.file_vars.values())
-            self.file_summary.set(f"{count} فایل از {len(files)} فایل انتخاب شده")
-        self._set_preview(files)
+        return set(str(Path(p).resolve()) for p in (job or {}).get("selected_files", []))
 
-    def _set_preview(self, files):
-        self.preview.configure(state="normal")
-        self.preview.delete("1.0", "end")
-        if not files:
-            self.preview.insert("end", "برای دیدن فایل‌ها، یک فولدر انتخاب کنید.")
+    def _update_file_area(self):
+        folder = self.folder_edit.text().strip()
+        if not folder or not Path(folder).is_dir():
+            self.file_summary.setText("فولدر معتبر نیست")
+            self.preview.clear()
+            return
+        files = current_files(folder, STATE_FILES)
+        selected = self._selected_files_for_job()
+        mode_selected = self.selected_radio.isChecked()
+        chosen = [p for p in files if str(p.resolve()) in selected]
+        if mode_selected:
+            self.file_summary.setText(f"{len(chosen)} فایل از {len(files)} فایل انتخاب شده")
         else:
-            selected = {path for path, var in self.file_vars.items() if var.get()}
-            for path in files[:250]:
-                marker = "✓" if str(path) in selected else "·"
-                self.preview.insert("end", f"{marker} {path.relative_to(Path(self.folder.get()))}\n")
-            if len(files) > 250:
-                self.preview.insert("end", f"\n... و {len(files) - 250} فایل دیگر")
-        self.preview.configure(state="disabled")
+            self.file_summary.setText(f"کل فولدر • {len(files)} فایل موجود")
+        lines = []
+        for path in files[:500]:
+            mark = "✓" if str(path.resolve()) in selected else "·"
+            lines.append(f"{mark}  {path.relative_to(Path(folder))}")
+        if len(files) > 500:
+            lines.append(f"... و {len(files) - 500} فایل دیگر")
+        self.preview.setPlainText("\n".join(lines))
 
     def open_file_selector(self):
-        folder = self.folder.get().strip()
+        folder = self.folder_edit.text().strip()
         if not folder or not Path(folder).is_dir():
-            messagebox.showwarning("انتخاب فایل", "ابتدا یک فولدر معتبر انتخاب کنید.")
+            QMessageBox.warning(self, "انتخاب فایل", "ابتدا یک فولدر معتبر انتخاب کنید.")
             return
         files = current_files(folder, STATE_FILES)
         if not files:
-            messagebox.showinfo("انتخاب فایل", "در این فولدر فایلی پیدا نشد.")
+            QMessageBox.information(self, "انتخاب فایل", "در این فولدر فایلی پیدا نشد.")
             return
-
-        dialog = tk.Toplevel(self.root)
-        dialog.title("انتخاب فایل‌های Backup")
-        dialog.geometry("760x620")
-        dialog.minsize(620, 480)
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.columnconfigure(0, weight=1)
-        dialog.rowconfigure(2, weight=1)
-
-        ttk.Label(dialog, text="فایل‌هایی که در حالت «فایل‌های انتخابی» پشتیبان‌گیری می‌شوند", style="Title.TLabel").grid(row=0, column=0, sticky="w", padx=16, pady=(14, 4))
-        summary = tk.StringVar()
-        ttk.Label(dialog, textvariable=summary, style="Muted.TLabel").grid(row=1, column=0, sticky="w", padx=16, pady=(0, 8))
-
-        body = ttk.Frame(dialog, style="Card.TFrame", padding=8)
-        body.grid(row=2, column=0, sticky="nsew", padx=16)
-        body.columnconfigure(0, weight=1)
-        body.rowconfigure(1, weight=1)
-
-        search = tk.StringVar()
-        ttk.Entry(body, textvariable=search).grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        ttk.Label(body, text="جست‌وجو در نام/مسیر فایل", style="Muted.TLabel").place(relx=0.01, rely=0.02)
-
-        canvas = tk.Canvas(body, bg="#f7f9fb", highlightthickness=0)
-        scrollbar = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
-        inner = ttk.Frame(canvas, style="Card.TFrame")
-        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.grid(row=1, column=0, sticky="nsew")
-        scrollbar.grid(row=1, column=1, sticky="ns")
-        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window_id, width=e.width))
-
-        local_vars = {str(path): self.file_vars.get(str(path), tk.BooleanVar(value=False)) for path in files}
-
-        def redraw(*_):
-            for child in inner.winfo_children():
-                child.destroy()
-            query = search.get().strip().lower()
-            shown = 0
-            for path in files:
-                relative = str(path.relative_to(Path(folder)))
-                if query and query not in relative.lower():
-                    continue
-                ttk.Checkbutton(inner, text=relative, variable=local_vars[str(path)]).pack(anchor="w", fill="x", padx=8, pady=2)
-                shown += 1
-            total_selected = sum(v.get() for v in local_vars.values())
-            summary.set(f"{total_selected} انتخاب از {len(files)} فایل • {shown} فایل نمایش داده شده")
-
-        def set_all(value):
-            for var in local_vars.values():
-                var.set(value)
-            redraw()
-
-        search.trace_add("write", redraw)
-        redraw()
-
-        actions = ttk.Frame(dialog, padding=12)
-        actions.grid(row=3, column=0, sticky="ew")
-        ttk.Button(actions, text="انتخاب همه", command=lambda: set_all(True)).pack(side="left")
-        ttk.Button(actions, text="پاک کردن همه", command=lambda: set_all(False)).pack(side="left", padx=6)
-
-        def apply():
-            self.file_vars = local_vars
+        dialog = FilePicker(files, self._selected_files_for_job(), self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
             job = self._current_job()
-            if job:
-                job["selected_files"] = [path for path, var in local_vars.items() if var.get()]
-            self.update_file_area()
-            dialog.destroy()
+            if job and not self._new_job:
+                job["selected_files"] = sorted(dialog.selected)
+            elif self._new_job:
+                self._pending_selected = sorted(dialog.selected)
+            else:
+                self._pending_selected = sorted(dialog.selected)
+            self._update_file_area()
 
-        ttk.Button(actions, text="لغو", command=dialog.destroy).pack(side="right", padx=6)
-        ttk.Button(actions, text="تأیید انتخاب‌ها", command=apply).pack(side="right")
+    def set_all_selected(self, value: bool):
+        folder = self.folder_edit.text().strip()
+        if not folder or not Path(folder).is_dir():
+            return
+        selected = [str(p.resolve()) for p in current_files(folder, STATE_FILES)] if value else []
+        job = self._current_job()
+        if job and not self._new_job:
+            job["selected_files"] = selected
+        else:
+            self._pending_selected = selected
+        self._update_file_area()
 
-    def set_all_selected(self, value):
-        if not self.file_vars:
-            self.update_file_area()
-        for var in self.file_vars.values():
-            var.set(value)
-        self._set_preview([Path(path) for path in self.file_vars])
-        if self.backup_mode.get() == "SELECTED":
-            self.file_summary.set(f"{sum(v.get() for v in self.file_vars.values())} فایل انتخاب شده")
+    def _pending_selected_files(self):
+        if hasattr(self, "_pending_selected"):
+            return list(self._pending_selected)
+        return []
+
+    def _validate(self):
+        folder = self.folder_edit.text().strip()
+        token = self.token.strip() or os.getenv("TELEGRAM_BOT_TOKEN", "")
+        chat_id = self.chat_edit.text().strip()
+        if not folder or not Path(folder).is_dir():
+            raise ValueError("فولدر معتبر نیست.")
+        if not token:
+            raise ValueError("TELEGRAM_BOT_TOKEN در .env یا محیط برنامه تنظیم نشده است.")
+        if not chat_id:
+            raise ValueError("Chat ID مقصد را وارد کنید یا از «بارگذاری چت‌ها» انتخاب کنید.")
+        try:
+            datetime.strptime(self.schedule_edit.text().strip(), "%H:%M")
+        except ValueError:
+            raise ValueError("زمان باید با قالب HH:MM باشد؛ مثلاً 23:00")
+        return token, folder, chat_id
 
     def save_current_job(self):
-        folder = self.folder.get().strip()
-        chat_id = self.chat_id.get().strip()
-        token = self.token.get().strip()
-        if not folder or not Path(folder).is_dir():
-            messagebox.showerror("تنظیمات ناقص", "فولدر معتبر نیست.")
-            return False
-        if not chat_id or not token:
-            messagebox.showerror("تنظیمات ناقص", "توکن و چت مقصد را وارد کنید.")
-            return False
         try:
-            datetime.strptime(self.schedule.get().strip(), "%H:%M")
-        except ValueError:
-            messagebox.showerror("تنظیمات ناقص", "زمان باید با قالب HH:MM باشد؛ مثلاً 23:00")
+            _, folder, chat_id = self._validate()
+        except ValueError as exc:
+            QMessageBox.critical(self, "تنظیمات ناقص", str(exc))
             return False
-
-        selected = [path for path, var in self.file_vars.items() if var.get()]
-        index = self._selected_index()
-        if index is None:
-            job = new_job(folder, chat_id, self.schedule.get().strip())
+        selected = self._pending_selected_files() if self._new_job else list(self._selected_files_for_job())
+        row = self._current_index()
+        if self._new_job or row is None:
+            job = new_job(folder, chat_id, self.schedule_edit.text().strip())
             self.jobs.append(job)
-            index = len(self.jobs) - 1
+            row = len(self.jobs) - 1
         else:
-            job = self.jobs[index]
+            job = self.jobs[row]
         folder_record = get_or_create_folder(folder)
         job.update({
-            "name": self.job_name.get().strip() or Path(folder).name,
-            "folder": str(Path(folder).expanduser().resolve()),
+            "name": self.name_edit.text().strip() or Path(folder).name,
+            "folder": folder,
             "folder_id": folder_record["id"],
             "chat_id": chat_id,
-            "destination": self.destination.get(),
-            "main_topic_name": self.main_topic.get().strip() or Path(folder).name,
-            "schedule": self.schedule.get().strip(),
-            "enabled": self.enabled.get(),
-            "backup_mode": self.backup_mode.get(),
+            "destination": "topic",
+            "main_topic_name": self.topic_edit.text().strip() or Path(folder).name,
+            "schedule": self.schedule_edit.text().strip(),
+            "enabled": self.enabled_check.isChecked(),
+            "backup_mode": "SELECTED" if self.selected_radio.isChecked() else "ALL",
             "selected_files": selected,
-            "replace_files": self.replace_files.get(),
-            "history_enabled": self.history_enabled.get(),
+            "replace_files": self.replace_check.isChecked(),
+            "history_enabled": self.history_check.isChecked(),
         })
         if folder_record.get("topic_id"):
             job["main_topic_id"] = folder_record["topic_id"]
         save_jobs(self.jobs)
-        self.refresh_jobs(index)
-        self.status.set("تغییرات Job ذخیره شد")
+        self._new_job = False
+        self._pending_selected = []
+        self._load_jobs()
+        self.jobs_list.setCurrentRow(row)
+        self.status_label.setText("تغییرات Job ذخیره شد")
         return True
 
     def toggle_job(self):
-        index = self._selected_index()
-        if index is None:
-            messagebox.showinfo("Job", "ابتدا یک Job را انتخاب کنید.")
+        row = self._current_index()
+        if row is None:
+            QMessageBox.information(self, "Job", "ابتدا یک Job را انتخاب کنید.")
             return
-        self.jobs[index]["enabled"] = not self.jobs[index].get("enabled", True)
+        job = self.jobs[row]
+        job["enabled"] = not job.get("enabled", True)
         save_jobs(self.jobs)
-        state = "فعال" if self.jobs[index]["enabled"] else "Pause"
-        self.status.set(f"Job {self.jobs[index].get('name')} → {state}")
-        self.refresh_jobs(index)
+        self._load_jobs()
+        self.jobs_list.setCurrentRow(row)
+        self.status_label.setText("Job فعال شد" if job["enabled"] else "Job روی Pause قرار گرفت")
 
     def delete_job(self):
-        index = self._selected_index()
-        if index is None:
-            messagebox.showinfo("حذف Job", "ابتدا یک Job را از فهرست انتخاب کنید.")
+        row = self._current_index()
+        if row is None:
+            QMessageBox.information(self, "حذف Job", "ابتدا یک Job را انتخاب کنید.")
             return
-        job = self.jobs[index]
-        answer = messagebox.askyesno(
+        job = self.jobs[row]
+        reply = QMessageBox.question(
+            self,
             "حذف Job",
-            f"Job «{job.get('name', 'Job')}» حذف شود؟\n\nFolder Identity، Topic اصلی و History دست‌نخورده باقی می‌مانند.",
-            icon="warning",
+            f"Job «{job.get('name', 'Job')}» حذف شود؟\n\nFolder Identity، Topic موجود و History حذف نمی‌شوند.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
-        if not answer:
+        if reply != QMessageBox.StandardButton.Yes:
             return
-        self.jobs.pop(index)
+        del self.jobs[row]
         save_jobs(self.jobs)
-        self.refresh_jobs(max(0, index - 1) if self.jobs else None)
-        self.status.set("Job حذف شد؛ Topic و Folder Identity حفظ شدند")
+        self._load_jobs()
+        self.status_label.setText("Job حذف شد؛ Folder Identity و Topic حفظ شدند")
 
-    def validate_current(self):
-        if not self.token.get().strip():
-            raise ValueError("توکن ربات را وارد کنید.")
-        if not self.folder.get().strip() or not Path(self.folder.get()).is_dir():
-            raise ValueError("فولدر پشتیبان معتبر نیست.")
-        if not self.chat_id.get().strip():
-            raise ValueError("چت مقصد را وارد کنید.")
-        datetime.strptime(self.schedule.get().strip(), "%H:%M")
+    def load_chats(self):
+        token = self.token.strip() or os.getenv("TELEGRAM_BOT_TOKEN", "")
+        if not token:
+            QMessageBox.critical(self, "Telegram", "TELEGRAM_BOT_TOKEN در .env یا محیط برنامه تنظیم نشده است.")
+            return
+        self.load_chats_btn.setEnabled(False)
+        self.status_label.setText("در حال دریافت چت‌ها از Telegram ...")
+        self.chat_loader = _ChatLoader(token)
+        self.chat_loader.loaded.connect(self._apply_chats)
+        self.chat_loader.failed.connect(self._chat_failed)
+        self.chat_loader.finished.connect(lambda: self.load_chats_btn.setEnabled(True))
+        self.chat_loader.start()
+
+    def _apply_chats(self, chats):
+        self.chats = chats
+        if not chats:
+            QMessageBox.information(self, "Telegram", "از getUpdates چتی پیدا نشد. یک پیام در گروه بفرستید و دوباره بارگذاری کنید.")
+            self.status_label.setText("هیچ چتی پیدا نشد")
+            return
+        dialog = ChatPicker(chats, self.chat_edit.text().strip(), self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.chat_edit.setText(dialog.selected_id)
+            self.status_label.setText(f"چت انتخاب شد: {chats[dialog.selected_id]}")
+        else:
+            self.status_label.setText(f"{len(chats)} چت پیدا شد")
+
+    def _chat_failed(self, error):
+        self.status_label.setText("دریافت چت‌ها ناموفق بود")
+        QMessageBox.critical(self, "Telegram", error)
 
     def prepare_topics_ui(self):
+        if not self.save_current_job():
+            return
+        job = self._current_job()
+        token = self.token.strip() or os.getenv("TELEGRAM_BOT_TOKEN", "")
+        if not job or not token:
+            return
         try:
-            self.validate_current()
-            if not self.save_current_job():
-                return
-            job = self._current_job()
-            if not job:
-                return
             forum = TelegramForum(telegram_request)
-            main_id, folder_record = _ensure_folder_topic(forum, self.token.get().strip(), job)
+            main_id, folder_record = _ensure_folder_topic(forum, token, job)
             job["main_topic_id"] = main_id
             job["folder_id"] = folder_record["id"]
-            if self.history_enabled.get():
-                job["history_topic_id"] = _ensure_project_history_topic(forum, self.token.get().strip(), job["chat_id"])
+            if job.get("history_enabled", True):
+                job["history_topic_id"] = _ensure_project_history_topic(forum, token, job["chat_id"])
             save_jobs(self.jobs)
-            self.status.set(f"Topic آماده است: {main_id}")
-        except Exception as error:
-            self.status.set("ساخت Topic ناموفق بود")
-            messagebox.showerror("Telegram", str(error))
+            self.status_label.setText(f"Topic آماده است: {main_id}")
+            QMessageBox.information(self, "Telegram", f"Topic فولدر آماده شد.\nTopic ID: {main_id}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Telegram", str(exc))
 
     def start_backup(self):
-        try:
-            self.validate_current()
-            if not self.save_current_job():
-                return
-            job = self._current_job()
-            if not job:
-                return
-            if self.worker and self.worker.is_alive():
-                messagebox.showinfo("Backup", "یک عملیات دیگر در حال اجراست.")
-                return
-            self.cancel_event.clear()
-            self.progress.set(0)
-            self.worker = threading.Thread(target=self._run_job, args=(dict(job),), daemon=True)
-            self.worker.start()
-        except ValueError as error:
-            messagebox.showerror("تنظیمات ناقص", str(error))
+        if self.worker and self.worker.isRunning():
+            QMessageBox.information(self, "Backup", "یک عملیات دیگر در حال اجراست.")
+            return
+        if not self.save_current_job():
+            return
+        job = self._current_job()
+        if not job:
+            return
+        token = self.token.strip() or os.getenv("TELEGRAM_BOT_TOKEN", "")
+        self.progress.setValue(0)
+        self.worker = _Worker(token, dict(job))
+        self.worker.progress.connect(self.progress.setValue)
+        self.worker.log.connect(self.status_label.setText)
+        self.worker.success.connect(self._backup_done)
+        self.worker.failure.connect(self._backup_failed)
+        self.worker.start()
+        self.status_label.setText(f"در حال Backup: {job.get('name', 'Job')}")
 
-    def _run_job(self, job):
-        self._ui(lambda: self.status.set(f"در حال Backup: {job.get('name', 'Job')}"))
-        try:
-            count, completed = run_job_backup(self.token.get().strip(), job, self._log, self._progress, self.cancel_event)
-            for current in self.jobs:
-                if current["id"] == job["id"]:
-                    current.update(job)
-            save_jobs(self.jobs)
-            self._ui(lambda: self.status.set(f"Backup {'کامل شد' if completed else 'متوقف شد'} • {count} فایل"))
-        except Exception as error:
-            self._log(f"خطا: {error}")
-            self._ui(lambda: self.status.set("Backup ناموفق بود"))
+    def _backup_done(self, result):
+        count, completed, job = result
+        for current in self.jobs:
+            if current.get("id") == job.get("id"):
+                current.update(job)
+        save_jobs(self.jobs)
+        self.status_label.setText(f"Backup {'کامل شد' if completed else 'متوقف شد'} • {count} فایل")
+        self.progress.setValue(100 if completed else self.progress.value())
 
-    def _progress(self, current, total):
-        value = current / total * 100 if total else 100
-        self._ui(lambda: self.progress.set(value))
+    def _backup_failed(self, error):
+        self.status_label.setText("Backup ناموفق بود")
+        QMessageBox.critical(self, "Backup", error)
 
-    def _log(self, text):
-        self._ui(lambda: self.status.set(text))
-
-    def _ui(self, callback):
-        try:
-            self.root.after(0, callback)
-        except tk.TclError:
-            pass
+    def stop_all(self):
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel()
+        self.scheduler_stop.set()
+        self.status_label.setText("Scheduler / عملیات متوقف شد")
 
     def start_scheduler(self):
         if self.scheduler_thread and self.scheduler_thread.is_alive():
-            self.status.set("Scheduler از قبل فعال است")
+            self.status_label.setText("Scheduler از قبل فعال است")
             return
         if not self.jobs:
-            messagebox.showinfo("Scheduler", "حداقل یک Job بسازید.")
+            QMessageBox.information(self, "Scheduler", "حداقل یک Job بسازید.")
             return
-        self.stop_event.clear()
-        self.scheduler_thread = threading.Thread(target=self.scheduler_loop, daemon=True)
+        self.scheduler_stop.clear()
+        self.scheduler_thread = threading.Thread(target=self._scheduler_loop, daemon=True)
         self.scheduler_thread.start()
-        self.status.set("Scheduler فعال است؛ فقط Jobهای Active اجرا می‌شوند")
+        self.status_label.setText("Scheduler فعال است؛ فقط Jobهای Active اجرا می‌شوند")
 
-    def stop_scheduler(self):
-        self.stop_event.set()
-        self.cancel_event.set()
-        self.status.set("Scheduler / عملیات متوقف شد")
-
-    def scheduler_loop(self):
+    def _scheduler_loop(self):
         last_runs: dict[str, object] = {}
-        while not self.stop_event.is_set():
+        while not self.scheduler_stop.is_set():
             now = datetime.now()
             jobs = load_and_migrate_jobs()
             for job in jobs:
+                if self.scheduler_stop.is_set():
+                    break
                 if not job.get("enabled", True) or job.get("schedule") != now.strftime("%H:%M"):
                     continue
                 if last_runs.get(job["id"]) == now.date():
                     continue
                 last_runs[job["id"]] = now.date()
-                if self.worker and self.worker.is_alive():
-                    self._log(f"Scheduler: Job رد شد چون Backup دیگری در حال اجراست: {job.get('name')}")
+                if self.worker and self.worker.isRunning():
                     continue
-                self.cancel_event.clear()
-                self.worker = threading.Thread(target=self._run_job, args=(dict(job),), daemon=True)
+                token = self.token.strip() or os.getenv("TELEGRAM_BOT_TOKEN", "")
+                self.worker = _Worker(token, dict(job))
+                self.worker.progress.connect(self.progress.setValue)
+                self.worker.log.connect(self.status_label.setText)
+                self.worker.success.connect(self._backup_done)
+                self.worker.failure.connect(self._backup_failed)
                 self.worker.start()
-            self.stop_event.wait(10)
+            self.scheduler_stop.wait(10)
 
-    def load_chats(self):
-        token = self.token.get().strip()
-        if not token:
-            messagebox.showerror("خطا", "توکن ربات را وارد کنید.")
-            return
-        threading.Thread(target=self._load_chats, args=(token,), daemon=True).start()
+    def closeEvent(self, event):
+        self.stop_all()
+        if self.worker and self.worker.isRunning():
+            self.worker.wait(1000)
+        if self.chat_loader and self.chat_loader.isRunning():
+            self.chat_loader.wait(1000)
+        event.accept()
 
-    def _load_chats(self, token):
-        try:
-            updates = telegram_request(token, "getUpdates")
-            chats = {}
-            for update in updates:
-                message = update.get("message") or update.get("channel_post") or {}
-                chat = message.get("chat") or {}
-                if chat.get("id") is not None:
-                    label = f"{chat.get('title') or chat.get('first_name') or 'بدون نام'} ({chat['id']})"
-                    chats[label] = str(chat["id"])
-            self._ui(lambda: self._apply_chats(chats))
-        except Exception as error:
-            self._log(f"دریافت چت‌ها ناموفق بود: {error}")
 
-    def _apply_chats(self, chats):
-        self.chats = chats
-        if chats:
-            self.chat_id.set(next(iter(chats.values())))
-            self.status.set(f"{len(chats)} چت پیدا شد")
-        else:
-            self.status.set("چتی از getUpdates پیدا نشد")
+def apply_style(app: QApplication):
+    app.setStyleSheet("""
+        QWidget { font-family: 'Segoe UI'; font-size: 10pt; }
+        QMainWindow { background: #edf1f5; }
+        QFrame#header { background: #17324d; border-radius: 10px; }
+        QLabel#headerTitle { color: white; font-size: 19pt; font-weight: 700; }
+        QLabel#headerSubtitle { color: #d6e1ea; font-size: 10pt; }
+        QFrame#card { background: white; border: 1px solid #d8e0e7; border-radius: 10px; }
+        QFrame#softCard { background: #f6f8fa; border: 1px solid #e2e7ec; border-radius: 8px; }
+        QLabel#sectionTitle { color: #17324d; font-size: 13pt; font-weight: 700; }
+        QLabel#subTitle { color: #17324d; font-weight: 700; }
+        QLabel#muted { color: #657586; }
+        QLabel#dialogTitle { color: #17324d; font-size: 12pt; font-weight: 700; padding: 4px; }
+        QPushButton { min-height: 34px; padding: 0 12px; border: 1px solid #c8d1da; border-radius: 6px; background: #ffffff; }
+        QPushButton:hover { background: #f0f4f7; }
+        QPushButton#primary { background: #17324d; color: white; border-color: #17324d; font-weight: 700; }
+        QPushButton#danger { color: #a32626; border-color: #e2baba; }
+        QPushButton#danger:hover { background: #fff2f2; }
+        QLineEdit, QPlainTextEdit, QListWidget, QComboBox { border: 1px solid #c9d3dc; border-radius: 6px; background: white; padding: 6px; }
+        QLineEdit { min-height: 28px; }
+        QListWidget::item { padding: 9px 7px; }
+        QListWidget::item:selected { background: #e8eff6; color: #17324d; }
+        QProgressBar { border: 1px solid #cad4dd; border-radius: 5px; background: #f4f6f8; height: 10px; }
+        QProgressBar::chunk { background: #17324d; border-radius: 5px; }
+        QSplitter::handle { background: #dce2e8; }
+    """)
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    BackupApp(root)
-    root.mainloop()
+    app = QApplication.instance() or QApplication([])
+    apply_style(app)
+    window = BackupApp()
+    window.show()
+    app.exec()
