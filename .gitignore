@@ -12,6 +12,9 @@ backup_folders.json
 backup_project.json
 backup_ui_settings.json
 
+# Local backup test folders
+backup-test*/
+
 # Python cache and tooling
 __pycache__/
 *.py[cod]
