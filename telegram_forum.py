@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from restore_catalog import record_uploaded_file
+
 
 class TelegramAPIError(RuntimeError):
     """Human-readable Telegram Bot API error with method and status details."""
@@ -50,7 +52,7 @@ class TelegramForum:
             data["caption"] = caption[:1024]
         try:
             with path.open("rb") as document:
-                return self.request(
+                result = self.request(
                     token,
                     "sendDocument",
                     files={"document": document},
@@ -70,6 +72,20 @@ class TelegramForum:
                         "sendDocument", response.status_code, description
                     ) from exc
             raise
+
+        document_info = result.get("document") or {}
+        file_id = document_info.get("file_id")
+        if file_id and result.get("message_id") is not None:
+            record_uploaded_file(
+                chat_id=chat_id,
+                message_id=int(result["message_id"]),
+                file_id=str(file_id),
+                path=str(path),
+                relative_path=path.name,
+                size=path.stat().st_size,
+                thread_id=thread_id,
+            )
+        return result
 
     def send_document_by_file_id(
         self,
