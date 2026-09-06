@@ -28,7 +28,7 @@ def load_env():
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"\''))
+        os.environ.setdefault(key.strip(), value.strip().strip('\"\''))
 
 
 def save_env(values):
@@ -75,11 +75,21 @@ def save_history(history):
     )
 
 
+def _is_state_file(path):
+    """Return True for local application state files that must not be backed up."""
+    try:
+        return path.resolve() in {LOG_FILE.resolve(), HISTORY_FILE.resolve()}
+    except OSError:
+        return False
+
+
 def get_changed_files(folder, since):
     changed = []
     for root, _, files in os.walk(folder):
         for name in files:
             path = Path(root) / name
+            if _is_state_file(path):
+                continue
             try:
                 if datetime.fromtimestamp(path.stat().st_mtime) > since:
                     changed.append(path)
@@ -96,6 +106,8 @@ def get_pending_files(folder):
         for root, _, names in os.walk(folder):
             for name in names:
                 path = Path(root) / name
+                if _is_state_file(path):
+                    continue
                 try:
                     modified = path.stat().st_mtime_ns
                     if (str(path), modified) not in sent_versions:
@@ -107,6 +119,8 @@ def get_pending_files(folder):
     for root, _, names in os.walk(folder):
         for name in names:
             path = Path(root) / name
+            if _is_state_file(path):
+                continue
             if path.is_file():
                 files.append(path)
     return files
@@ -136,6 +150,8 @@ def telegram_request(token, method, **kwargs):
             if not payload.get("ok"):
                 raise RuntimeError(payload.get("description", "Telegram API error"))
             return payload["result"]
+        except requests.HTTPError:
+            raise
         except requests.RequestException as error:
             last_error = error
             if attempt < TELEGRAM_RETRIES - 1:
