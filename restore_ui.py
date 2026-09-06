@@ -123,7 +123,7 @@ class RestoreDialog(QDialog):
         for entry in self.entries:
             label = (
                 f"{entry.get('relative_path', entry.get('path', ''))}"
-                f"  •  v?  •  {entry.get('uploaded_at', '')}"
+                f"  •  v{entry.get('version', '?')}  •  {entry.get('uploaded_at', '')}"
                 f"  •  {int(entry.get('size', 0)) / 1024:.1f} KB"
             )
             if query and query not in label.casefold():
@@ -146,8 +146,7 @@ class RestoreDialog(QDialog):
         item = self.list.item(row)
         entry = item.data(256)
         self.info.setText(
-            (f"Telegram message: {entry.get('message_id')} | "
-             f"source: {entry.get('path', '')}")
+            f"Telegram message: {entry.get('message_id')} | source: {entry.get('path', '')}"
         )
 
     def _choose_destination(self) -> None:
