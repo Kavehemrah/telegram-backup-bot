@@ -136,9 +136,9 @@ def get_pending_files(folder):
 def _safe_response_text(response: requests.Response) -> str:
     try:
         payload = response.json()
-        return json.dumps(payload, ensure_ascii=False)
-    except ValueError:
-        return response.text[:4000]
+        return json.dumps(payload, ensure_ascii=False, default=str)
+    except (ValueError, TypeError):
+        return str(response.text)[:4000]
 
 
 def _debug_telegram_failure(method: str, response: requests.Response) -> None:
@@ -192,7 +192,7 @@ def telegram_request(token, method, **kwargs):
             if not payload.get("ok"):
                 print(
                     f"Telegram API returned ok=false for {method}: "
-                    f"{json.dumps(payload, ensure_ascii=False)}",
+                    f"{json.dumps(payload, ensure_ascii=False, default=str)}",
                     flush=True,
                 )
                 raise RuntimeError(
