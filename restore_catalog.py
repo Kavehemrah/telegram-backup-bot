@@ -33,6 +33,12 @@ def record_uploaded_file(
     thread_id: int | None = None,
 ) -> None:
     entries = load_restore_index()
+    version = 1 + sum(
+        1
+        for item in entries
+        if str(item.get("chat_id")) == str(chat_id)
+        and str(item.get("relative_path")) == str(relative_path)
+    )
     entries.append(
         {
             "chat_id": str(chat_id),
@@ -42,6 +48,7 @@ def record_uploaded_file(
             "relative_path": str(relative_path),
             "size": int(size),
             "thread_id": thread_id,
+            "version": version,
             "uploaded_at": datetime.now().isoformat(timespec="seconds"),
         }
     )
