@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+import time
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,8 @@ ENV_FILE = BASE_DIR / ".env"
 LOG_FILE = BASE_DIR / "last_backup.json"
 HISTORY_FILE = BASE_DIR / "backup_history.json"
 TELEGRAM_TIMEOUT = 30
+TELEGRAM_RETRIES = 3
+BACKUP_LOCK = threading.Lock()
 
 
 def load_env():
@@ -45,10 +48,14 @@ def load_last_backup():
         return datetime.min
 
 
+def _atomic_write(path, text):
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(text, encoding="utf-8")
+    temporary.replace(path)
+
+
 def save_backup_time():
-    LOG_FILE.write_text(
-        json.dumps({"last_backup": datetime.now().isoformat()}), encoding="utf-8"
-    )
+    _atomic_write(LOG_FILE, json.dumps({"last_backup": datetime.now().isoformat()}))
 
 
 def load_history():
@@ -62,8 +69,9 @@ def load_history():
 
 
 def save_history(history):
-    HISTORY_FILE.write_text(
-        json.dumps(history[-5000:], ensure_ascii=False, indent=2), encoding="utf-8"
+    _atomic_write(
+        HISTORY_FILE,
+        json.dumps(history[-5000:], ensure_ascii=False, indent=2),
     )
 
 
@@ -105,43 +113,78 @@ def get_pending_files(folder):
 
 
 def telegram_request(token, method, **kwargs):
-    response = requests.post(
-        f"https://api.telegram.org/bot{token}/{method}",
-        timeout=TELEGRAM_TIMEOUT,
-        **kwargs,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    if not payload.get("ok"):
-        raise RuntimeError(payload.get("description", "Telegram API error"))
-    return payload["result"]
+    """Call Telegram with bounded retries for transient failures only."""
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    last_error = None
+    for attempt in range(TELEGRAM_RETRIES):
+        try:
+            response = requests.post(url, timeout=TELEGRAM_TIMEOUT, **kwargs)
+            if response.status_code == 429:
+                retry_after = 1
+                try:
+                    retry_after = int(response.json().get("parameters", {}).get("retry_after", 1))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
+                if attempt < TELEGRAM_RETRIES - 1:
+                    time.sleep(max(1, min(retry_after, 60)))
+                    continue
+            if 500 <= response.status_code < 600 and attempt < TELEGRAM_RETRIES - 1:
+                time.sleep(2 ** attempt)
+                continue
+            response.raise_for_status()
+            payload = response.json()
+            if not payload.get("ok"):
+                raise RuntimeError(payload.get("description", "Telegram API error"))
+            return payload["result"]
+        except requests.RequestException as error:
+            last_error = error
+            if attempt < TELEGRAM_RETRIES - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise
+    raise last_error or RuntimeError("Telegram request failed")
 
 
 def send_file(token, chat_id, path):
     with path.open("rb") as document:
-        telegram_request(token, "sendDocument", files={"document": document}, data={"chat_id": chat_id})
+        telegram_request(
+            token,
+            "sendDocument",
+            files={"document": document},
+            data={"chat_id": chat_id},
+        )
 
 
 def backup_changed_files(token, chat_id, folder, log, progress=None, cancel_event=None, selected_files=None):
-    changed_files = selected_files if selected_files is not None else get_pending_files(folder)
-    total = len(changed_files)
-    history = load_history()
-    for index, path in enumerate(changed_files, start=1):
-        if cancel_event and cancel_event.is_set():
-            log("ارسال توسط کاربر متوقف شد")
-            return index - 1, False
-        send_file(token, chat_id, path)
-        history.append({
-            "path": str(path),
-            "modified": path.stat().st_mtime_ns,
-            "sent_at": datetime.now().isoformat(timespec="seconds"),
-        })
-        save_history(history)
-        log(f"ارسال شد: {path}")
-        if progress:
-            progress(index, total)
-    save_backup_time()
-    return total, True
+    if not BACKUP_LOCK.acquire(blocking=False):
+        raise RuntimeError("یک عملیات پشتیبان‌گیری دیگر در حال اجراست.")
+    try:
+        changed_files = selected_files if selected_files is not None else get_pending_files(folder)
+        total = len(changed_files)
+        history = load_history()
+        for index, path in enumerate(changed_files, start=1):
+            if cancel_event and cancel_event.is_set():
+                log("ارسال توسط کاربر متوقف شد")
+                return index - 1, False
+            try:
+                modified = path.stat().st_mtime_ns
+            except OSError:
+                log(f"فایل در دسترس نیست و رد شد: {path}")
+                continue
+            send_file(token, chat_id, path)
+            history.append({
+                "path": str(path),
+                "modified": modified,
+                "sent_at": datetime.now().isoformat(timespec="seconds"),
+            })
+            save_history(history)
+            log(f"ارسال شد: {path}")
+            if progress:
+                progress(index, total)
+        save_backup_time()
+        return total, True
+    finally:
+        BACKUP_LOCK.release()
 
 
 class BackupApp:
@@ -408,11 +451,15 @@ class BackupApp:
             self.root.after(0, lambda: self.status.set("اتصال برقرار نشد"))
 
     def load_chats(self):
-        if not self.token.get().strip():
+        token = self.token.get().strip()
+        if not token:
             messagebox.showerror("خطا", "ابتدا توکن ربات را وارد کنید.")
             return
+        threading.Thread(target=self._load_chats, args=(token,), daemon=True).start()
+
+    def _load_chats(self, token):
         try:
-            updates = telegram_request(self.token.get().strip(), "getUpdates")
+            updates = telegram_request(token, "getUpdates")
             chats = {}
             for update in updates:
                 message = update.get("message") or update.get("channel_post") or {}
@@ -420,16 +467,30 @@ class BackupApp:
                 if chat.get("id") is not None:
                     label = f"{chat.get('title') or chat.get('first_name') or 'بدون نام'} ({chat['id']})"
                     chats[label] = str(chat["id"])
-            self.chats = chats
-            self.chat_combo["values"] = list(chats)
-            if chats:
-                self.chat_combo.current(0)
-                self.chat_id.set(next(iter(chats.values())))
-                self.write_log(f"{len(chats)} چت پیدا شد")
-            else:
-                self.write_log("چتی در getUpdates پیدا نشد؛ به ربات پیام بدهید و دوباره تلاش کنید")
+            self.root.after(0, lambda: self._apply_chats(chats))
         except Exception as error:
-            messagebox.showerror("خطای تلگرام", str(error))
+            self.write_log(f"خطای دریافت چت‌ها: {error}")
+            self.root.after(0, lambda: messagebox.showerror("خطای تلگرام", str(error)))
+
+    def _apply_chats(self, chats):
+        self.chats = chats
+        self.chat_combo["values"] = list(chats)
+        if chats:
+            self.chat_combo.current(0)
+            self.chat_id.set(next(iter(chats.values())))
+            self.write_log(f"{len(chats)} چت پیدا شد")
+        else:
+            self.write_log("چتی در getUpdates پیدا نشد؛ به ربات پیام بدهید و دوباره تلاش کنید")
+
+    def _start_backup_thread(self, config, selected_files=None):
+        if self.worker and self.worker.is_alive():
+            self.status.set("یک عملیات پشتیبان‌گیری در حال اجراست")
+            return False
+        self.cancel_event.clear()
+        self.progress_value.set(0)
+        self.worker = threading.Thread(target=self.run_backup, args=(config, selected_files), daemon=True)
+        self.worker.start()
+        return True
 
     def start_backup(self):
         try:
@@ -438,9 +499,7 @@ class BackupApp:
             messagebox.showerror("تنظیمات ناقص", str(error))
             return
         config = (self.token.get().strip(), self.chat_id.get().strip(), self.folder.get().strip())
-        self.cancel_event.clear()
-        self.progress_value.set(0)
-        threading.Thread(target=self.run_backup, args=(config,), daemon=True).start()
+        self._start_backup_thread(config)
 
     def start_selected_backup(self):
         try:
@@ -453,15 +512,18 @@ class BackupApp:
             messagebox.showinfo("صف خالی", "حداقل یک فایل را انتخاب کنید.")
             return
         config = (self.token.get().strip(), self.chat_id.get().strip(), self.folder.get().strip())
-        self.cancel_event.clear()
-        self.progress_value.set(0)
-        threading.Thread(target=self.run_backup, args=(config, selected), daemon=True).start()
+        self._start_backup_thread(config, selected)
 
-    def run_backup(self, config=None, selected_files=None):
-        config = config or (self.token.get().strip(), self.chat_id.get().strip(), self.folder.get().strip())
+    def run_backup(self, config, selected_files=None):
         self.root.after(0, lambda: self.status.set("در حال ارسال..."))
         try:
-            count, completed = backup_changed_files(*config, self.write_log, self.update_progress, self.cancel_event, selected_files)
+            count, completed = backup_changed_files(
+                *config,
+                self.write_log,
+                self.update_progress,
+                self.cancel_event,
+                selected_files,
+            )
             self.root.after(0, lambda: self.file_count.set(f"{count} فایل ارسال‌شده"))
             self.root.after(0, lambda: self.status.set("ارسال کامل شد" if completed else "ارسال متوقف شد"))
             self.root.after(0, self.refresh_file_lists)
@@ -484,22 +546,29 @@ class BackupApp:
             return
         self.stop_event.clear()
         self.cancel_event.clear()
-        self.worker = threading.Thread(target=self.scheduler_loop, daemon=True)
+        schedule_time = self.schedule.get().strip()
+        config = (self.token.get().strip(), self.chat_id.get().strip(), self.folder.get().strip())
+        self.worker = threading.Thread(target=self.scheduler_loop, args=(schedule_time, config), daemon=True)
         self.worker.start()
-        self.status.set(f"زمان‌بندی فعال است: هر روز ساعت {self.schedule.get()}")
+        self.status.set(f"زمان‌بندی فعال است: هر روز ساعت {schedule_time}")
 
     def stop_scheduler(self):
         self.stop_event.set()
         self.cancel_event.set()
         self.status.set("زمان‌بندی متوقف شد")
 
-    def scheduler_loop(self):
+    def scheduler_loop(self, schedule_time, config):
+        last_run_date = None
         while not self.stop_event.is_set():
-            if datetime.now().strftime("%H:%M") == self.schedule.get().strip():
-                self.run_backup()
-                self.stop_event.wait(61)
-            else:
-                self.stop_event.wait(20)
+            now = datetime.now()
+            if now.strftime("%H:%M") == schedule_time and last_run_date != now.date():
+                last_run_date = now.date()
+                if BACKUP_LOCK.acquire(blocking=False):
+                    BACKUP_LOCK.release()
+                    self.run_backup(config)
+                else:
+                    self.write_log("زمان‌بندی رد شد؛ یک Backup دیگر در حال اجراست")
+            self.stop_event.wait(10)
 
 
 if __name__ == "__main__":
