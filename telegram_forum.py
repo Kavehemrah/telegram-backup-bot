@@ -177,11 +177,7 @@ class TelegramForum:
     ) -> int:
         chat = self.get_chat(token, chat_id)
         if not chat.get("is_forum"):
-            raise RuntimeError("Telegram chat is not a forum.")
-        if existing_id:
-            try:
-                self.send_text(token, chat_id, "ping", existing_id)
-                return int(existing_id)
-            except RuntimeError:
-                pass
-        return self.create_topic(token, chat_id, name)
+            raise RuntimeError(
+                "چت مقصد Forum نیست. برای استفاده از Topic باید Topics گروه فعال باشد."
+            )
+        return int(existing_id) if existing_id else self.create_topic(token, chat_id, name)
