@@ -1,14 +1,16 @@
-"""Persistent job and version-manifest storage for multi-folder backups."""
+"""Persistent job, folder identity and file-manifest storage."""
 
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 JOBS_FILE = BASE_DIR / "backup_jobs.json"
 MANIFEST_FILE = BASE_DIR / "backup_manifest.json"
+FOLDERS_FILE = BASE_DIR / "backup_folders.json"
 
 
 def _read_json(path: Path, default):
@@ -35,21 +37,117 @@ def save_jobs(jobs: list[dict]) -> None:
     _write_json(JOBS_FILE, jobs)
 
 
+def load_folders() -> list[dict]:
+    return _read_json(FOLDERS_FILE, [])
+
+
+def save_folders(folders: list[dict]) -> None:
+    _write_json(FOLDERS_FILE, folders)
+
+
+def normalize_folder(folder: str) -> str:
+    return os.path.normcase(str(Path(folder).expanduser().resolve()))
+
+
+def get_or_create_folder(folder: str) -> dict:
+    normalized = normalize_folder(folder)
+    folders = load_folders()
+    for item in folders:
+        if item.get("path_key") == normalized:
+            item.setdefault("id", uuid.uuid4().hex[:12])
+            item.setdefault("topic_id", None)
+            item.setdefault("history_topic_id", None)
+            item.setdefault("topic_name", Path(folder).name or folder)
+            return item
+    item = {
+        "id": uuid.uuid4().hex[:12],
+        "path": str(Path(folder).expanduser().resolve()),
+        "path_key": normalized,
+        "topic_id": None,
+        "history_topic_id": None,
+        "topic_name": Path(folder).name or folder,
+        "created_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+    }
+    folders.append(item)
+    save_folders(folders)
+    return item
+
+
+def find_folder(folder: str) -> dict | None:
+    normalized = normalize_folder(folder)
+    return next((item for item in load_folders() if item.get("path_key") == normalized), None)
+
+
+def update_folder(folder_record: dict) -> None:
+    folders = load_folders()
+    for index, item in enumerate(folders):
+        if item.get("id") == folder_record.get("id"):
+            folders[index] = folder_record
+            save_folders(folders)
+            return
+    folders.append(folder_record)
+    save_folders(folders)
+
+
 def new_job(folder: str, chat_id: str, schedule: str = "23:00") -> dict:
+    folder_record = get_or_create_folder(folder)
     name = Path(folder).name or folder
     return {
         "id": uuid.uuid4().hex[:12],
         "name": name,
-        "folder": folder,
+        "folder": str(Path(folder).expanduser().resolve()),
+        "folder_id": folder_record["id"],
         "chat_id": chat_id,
         "destination": "topic",
-        "main_topic_id": None,
-        "history_topic_id": None,
-        "main_topic_name": name,
-        "history_topic_name": f"{name} History",
+        "main_topic_id": folder_record.get("topic_id"),
+        "history_topic_id": folder_record.get("history_topic_id"),
+        "main_topic_name": folder_record.get("topic_name") or name,
+        "history_topic_name": "Backup History",
         "schedule": schedule,
         "enabled": True,
+        "backup_mode": "ALL",
+        "selected_files": [],
+        "replace_files": True,
+        "history_enabled": True,
     }
+
+
+def normalize_job(job: dict) -> dict:
+    """Add new settings to old jobs without destroying existing topic ids."""
+    job.setdefault("id", uuid.uuid4().hex[:12])
+    job.setdefault("name", Path(job.get("folder", "Job")).name or "Job")
+    job.setdefault("schedule", "23:00")
+    job.setdefault("enabled", True)
+    job.setdefault("backup_mode", "ALL")
+    job.setdefault("selected_files", [])
+    job.setdefault("replace_files", True)
+    job.setdefault("history_enabled", True)
+    if job.get("folder"):
+        folder_record = get_or_create_folder(job["folder"])
+        job.setdefault("folder_id", folder_record["id"])
+        if not folder_record.get("topic_id") and job.get("main_topic_id"):
+            folder_record["topic_id"] = job["main_topic_id"]
+            update_folder(folder_record)
+        elif folder_record.get("topic_id") and not job.get("main_topic_id"):
+            job["main_topic_id"] = folder_record["topic_id"]
+        if not folder_record.get("history_topic_id") and job.get("history_topic_id"):
+            folder_record["history_topic_id"] = job["history_topic_id"]
+            update_folder(folder_record)
+        elif folder_record.get("history_topic_id") and not job.get("history_topic_id"):
+            job["history_topic_id"] = folder_record["history_topic_id"]
+    return job
+
+
+def load_and_migrate_jobs() -> list[dict]:
+    jobs = load_jobs()
+    changed = False
+    for job in jobs:
+        before = dict(job)
+        normalize_job(job)
+        changed = changed or job != before
+    if changed:
+        save_jobs(jobs)
+    return jobs
 
 
 def load_manifest() -> dict:
@@ -68,6 +166,8 @@ def current_files(folder: str, excluded: set[Path] | None = None) -> list[Path]:
     excluded = {p.resolve() for p in (excluded or set())}
     root = Path(folder).resolve()
     files = []
+    if not root.is_dir():
+        return files
     for path in root.rglob("*"):
         if not path.is_file() or path.resolve() in excluded:
             continue
@@ -84,9 +184,9 @@ def pending_files(folder: str, manifest: dict, excluded: set[Path] | None = None
     for path in current_files(folder, excluded):
         record = manifest.get(file_key(path), {})
         try:
-            modified = path.stat().st_mtime_ns
+            stat = path.stat()
         except OSError:
             continue
-        if record.get("modified") != modified or record.get("deleted"):
+        if record.get("modified") != stat.st_mtime_ns or record.get("size") != stat.st_size or record.get("deleted"):
             result.append(path)
     return result
