@@ -95,7 +95,6 @@ def update_folder(folder_record: dict) -> None:
 def new_job(folder: str, chat_id: str, schedule: str = "23:00") -> dict:
     folder_record = get_or_create_folder(folder)
     name = Path(folder).name or folder
-    project = load_project()
     return {
         "id": uuid.uuid4().hex[:12],
         "name": name,
@@ -104,7 +103,7 @@ def new_job(folder: str, chat_id: str, schedule: str = "23:00") -> dict:
         "chat_id": chat_id,
         "destination": "topic",
         "main_topic_id": folder_record.get("topic_id"),
-        "history_topic_id": project.get("history_topic_id"),
+        "history_topic_id": None,
         "main_topic_name": folder_record.get("topic_name") or name,
         "history_topic_name": "Backup History",
         "schedule": schedule,
@@ -134,12 +133,9 @@ def normalize_job(job: dict) -> dict:
             update_folder(folder_record)
         elif folder_record.get("topic_id") and not job.get("main_topic_id"):
             job["main_topic_id"] = folder_record["topic_id"]
-        project = load_project()
-        if not project.get("history_topic_id") and job.get("history_topic_id"):
-            project["history_topic_id"] = job["history_topic_id"]
-            save_project(project)
-        elif project.get("history_topic_id") and not job.get("history_topic_id"):
-            job["history_topic_id"] = project["history_topic_id"]
+        # Legacy per-job history IDs are deliberately not promoted to the
+        # project history topic. A new central topic is created on demand.
+        job["history_topic_id"] = None
     return job
 
 
