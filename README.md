@@ -5,14 +5,18 @@ A lightweight Windows-friendly desktop utility for backing up multiple local fol
 ## Features
 
 - Multiple independent Backup Jobs
-- One local folder per job
-- Manual and daily scheduled backups
-- Selective and incremental backup behavior
-- Telegram chat discovery and connection test
-- Optional `General` destination or dedicated Forum Topic per job
-- Automatic creation of a main Topic and a separate History Topic
-- Versioned backups: when a file changes, the previous Telegram message is copied to History and the current Topic keeps only the latest version
-- Deleted local files are preserved in the History Topic with a deletion record
+- Persistent `ACTIVE` / `PAUSED` state per job
+- One local Folder Identity per folder, independent from its Job lifecycle
+- A folder keeps its Telegram Topic mapping after its Job is deleted
+- Re-adding the same folder reuses its previous Telegram Topic
+- Manual and daily scheduled backups; scheduler runs only active jobs
+- `Entire folder` or `Selected files` backup mode
+- Persistent file selection per Job; new files are not automatically selected in selective mode
+- Independent `Replace files` and `History` settings
+- One central History Topic for the whole destination forum
+- One current/live Topic per folder
+- Versioned backups: when a file changes, its previous message can be copied to the central History Topic and the live message can be deleted when replacement is enabled
+- Deleted local files can be preserved in the central History Topic
 - Previous Telegram versions are moved with `copyMessage`; the application does not download and re-upload them
 - Local manifest storing Telegram message IDs and file versions
 - Retry/backoff for transient Telegram/network failures
@@ -25,7 +29,7 @@ A lightweight Windows-friendly desktop utility for backing up multiple local fol
 - `requests`
 - Tkinter (included with the standard Windows Python distribution)
 
-For Topic mode, the destination must be a Telegram forum supergroup. The bot must have permission to manage topics; it also needs message deletion permission if the main Topic is to contain only the latest versions. Telegram's Bot API supports `createForumTopic`, `message_thread_id`, and `copyMessage`, so historical versions can be copied server-side without downloading the file again.
+For Topic mode, the destination must be a Telegram forum supergroup. The bot needs permission to manage topics and message deletion if the live Topic should contain only the latest versions.
 
 ## Installation
 
@@ -43,46 +47,71 @@ pip install -r requirements.txt
 python backup_bot.py
 ```
 
-## Configuration
+## Job configuration
 
-The UI manages Backup Jobs. Each job contains:
+Each Backup Job stores:
 
-- folder
+- folder and persistent Folder Identity
 - Telegram chat
 - destination: `topic` or `general`
 - main Topic name
-- History Topic name
 - daily schedule
-- enabled/disabled state
+- active/paused state
+- backup mode: `Entire folder` or `Selected files`
+- selected file paths when selective mode is used
+- `Replace files`
+- `History`
 
-Existing `.env` settings from earlier versions are migrated to a single Backup Job on first launch.
+Deleting a Job does not delete its Folder Identity, manifest, or Telegram Topic. Creating a new Job for the same folder finds that identity and reuses its Topic ID.
 
-Generated local state is stored in `backup_jobs.json` and `backup_manifest.json`; both are ignored by Git.
+## Topic behavior
 
-## Versioned Topic behavior
-
-For a job configured for Topic mode, the application creates two Topics:
+The intended Topic layout is:
 
 ```text
-Finance
-├── invoice.pdf       <- latest version only
+Folder A
+├── invoice.pdf       <- latest/current version
 ├── salary.xlsx
 └── contract.pdf
 
-Finance History
-├── invoice.pdf       <- previous versions
-├── salary.xlsx
-└── deleted-file.pdf  <- preserved after local deletion
+Folder B
+├── report.pdf
+└── plan.xlsx
+
+Backup History       <- one central history Topic
+├── previous versions from Folder A
+├── previous versions from Folder B
+└── deleted files
 ```
 
-When `invoice.pdf` changes, the previous message is copied to the History Topic using Telegram's `copyMessage` API. The old message in the main Topic is then deleted when the bot has the required permission, and the new local file is uploaded once to the main Topic. The old file bytes are never downloaded to the computer for this transition.
+When a current file changes:
+
+1. If History is enabled, the previous Telegram message is copied to `Backup History` with metadata.
+2. If Replace is enabled, the old live message is deleted.
+3. The new local file is uploaded to the folder's live Topic.
+
+This keeps the two switches independent. For example, Replace can be disabled while History remains enabled, in which case the old live message is retained and the previous version is also archived.
+
+## Selective backup
+
+Choose `Selected files` and tick only the files that the Job should back up. The selection is stored with that Job. A new file appearing later is not included until it is explicitly selected.
+
+## Testing
+
+Run the unit tests with:
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+The CI workflow also compiles the source and runs the test suite on Python 3.11 and 3.12.
 
 ## Security notes
 
 - Never publish the bot token.
 - Keep `.env` outside version control.
 - Generated JSON state can contain local file paths and Telegram message IDs.
-- For real access separation, use separate private groups rather than relying on Topic-level permissions; Telegram Topics do not provide independent per-topic member ACLs.
+- Telegram Topics do not provide independent member ACLs; use separate private groups for real access separation.
 
 ## Project structure
 
@@ -92,9 +121,6 @@ telegram-backup-bot/
 ├── backup_jobs.py
 ├── telegram_forum.py
 ├── tests/
-│   ├── test_backup_state.py
-│   ├── test_forum_and_jobs.py
-│   └── test_telegram_requests.py
 ├── .env.example
 ├── .gitignore
 ├── LICENSE
@@ -102,14 +128,13 @@ telegram-backup-bot/
 └── requirements.txt
 ```
 
-The project intentionally remains small. The backup engine, persistent jobs, Telegram Forum operations, and UI are separated only where the new functionality requires it.
+The project intentionally remains small. The backup engine, persistent state, Telegram Forum operations, and UI are separated only where the functionality requires it.
 
 ## Roadmap
 
 - Windows packaging (`.exe`)
 - Restore selected file/version from Telegram
 - Better backup reports and retention policies
-- Optional private-group destinations for sensitive jobs
 
 ## License
 
