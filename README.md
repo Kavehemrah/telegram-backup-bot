@@ -15,7 +15,7 @@ A lightweight Windows-friendly desktop utility for backing up multiple local fol
 - Independent `Replace files` and `History` settings
 - One central History Topic for the whole destination forum
 - One current/live Topic per folder
-- Versioned backups: when a file changes, its previous message can be copied to the central History Topic and the live message can be deleted when replacement is enabled
+- Versioned backups: when a file changes, its previous Telegram message can be copied to the central History Topic and the live message can be deleted when replacement is enabled
 - Deleted local files can be preserved in the central History Topic
 - Previous Telegram versions are moved with `copyMessage`; the application does not download and re-upload them
 - Local manifest storing Telegram message IDs and file versions
@@ -33,19 +33,14 @@ For Topic mode, the destination must be a Telegram forum supergroup. The bot nee
 
 ## Installation
 
-```bash
-git clone https://github.com/Kavehemrah/telegram-backup-bot.git
-cd telegram-backup-bot
-python -m venv .venv
-```
-
-Windows PowerShell:
-
 ```powershell
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-python backup_bot.py
+python run_backup_ui.py
 ```
+
+`run_backup_ui.py` is the recommended desktop entry point. `backup_bot.py` contains the backup engine and Telegram operations.
 
 ## Job configuration
 
@@ -90,21 +85,19 @@ When a current file changes:
 2. If Replace is enabled, the old live message is deleted.
 3. The new local file is uploaded to the folder's live Topic.
 
-This keeps the two switches independent. For example, Replace can be disabled while History remains enabled, in which case the old live message is retained and the previous version is also archived.
+The two switches are independent. Replace can be disabled while History remains enabled; in that case the old live message stays in the folder Topic and the previous version is also archived.
 
 ## Selective backup
 
-Choose `Selected files` and tick only the files that the Job should back up. The selection is stored with that Job. A new file appearing later is not included until it is explicitly selected.
+Choose `Selected files` and use `انتخاب / مدیریت فایل‌ها`. The selection is stored with that Job. A new file appearing later is not included until it is explicitly selected.
 
 ## Testing
-
-Run the unit tests with:
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
 
-The CI workflow also compiles the source and runs the test suite on Python 3.11 and 3.12.
+The CI workflow compiles the source and runs the test suite on Python 3.11 and 3.12.
 
 ## Security notes
 
@@ -119,6 +112,8 @@ The CI workflow also compiles the source and runs the test suite on Python 3.11 
 telegram-backup-bot/
 ├── backup_bot.py
 ├── backup_jobs.py
+├── backup_ui.py
+├── run_backup_ui.py
 ├── telegram_forum.py
 ├── tests/
 ├── .env.example
