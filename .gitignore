@@ -10,6 +10,7 @@ backup_jobs.json
 backup_manifest.json
 backup_folders.json
 backup_project.json
+backup_ui_settings.json
 
 # Python cache and tooling
 __pycache__/
