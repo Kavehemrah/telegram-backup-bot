@@ -62,7 +62,7 @@ class TelegramRequestTests(unittest.TestCase):
         with patch.object(backup_bot.requests, "post", return_value=response) as post, patch.object(
             backup_bot.time, "sleep"
         ) as sleep:
-            with self.assertRaises(requests.HTTPError):
+            with self.assertRaisesRegex(RuntimeError, r"Telegram getMe failed \(401\)"):
                 backup_bot.telegram_request("token", "getMe")
 
         post.assert_called_once()
