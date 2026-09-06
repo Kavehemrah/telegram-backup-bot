@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 JOBS_FILE = BASE_DIR / "backup_jobs.json"
 MANIFEST_FILE = BASE_DIR / "backup_manifest.json"
 FOLDERS_FILE = BASE_DIR / "backup_folders.json"
+PROJECT_FILE = BASE_DIR / "backup_project.json"
 
 
 def _read_json(path: Path, default):
@@ -45,6 +47,14 @@ def save_folders(folders: list[dict]) -> None:
     _write_json(FOLDERS_FILE, folders)
 
 
+def load_project() -> dict:
+    return _read_json(PROJECT_FILE, {})
+
+
+def save_project(project: dict) -> None:
+    _write_json(PROJECT_FILE, project)
+
+
 def normalize_folder(folder: str) -> str:
     return os.path.normcase(str(Path(folder).expanduser().resolve()))
 
@@ -56,7 +66,6 @@ def get_or_create_folder(folder: str) -> dict:
         if item.get("path_key") == normalized:
             item.setdefault("id", uuid.uuid4().hex[:12])
             item.setdefault("topic_id", None)
-            item.setdefault("history_topic_id", None)
             item.setdefault("topic_name", Path(folder).name or folder)
             return item
     item = {
@@ -64,18 +73,12 @@ def get_or_create_folder(folder: str) -> dict:
         "path": str(Path(folder).expanduser().resolve()),
         "path_key": normalized,
         "topic_id": None,
-        "history_topic_id": None,
         "topic_name": Path(folder).name or folder,
-        "created_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
     }
     folders.append(item)
     save_folders(folders)
     return item
-
-
-def find_folder(folder: str) -> dict | None:
-    normalized = normalize_folder(folder)
-    return next((item for item in load_folders() if item.get("path_key") == normalized), None)
 
 
 def update_folder(folder_record: dict) -> None:
@@ -92,6 +95,7 @@ def update_folder(folder_record: dict) -> None:
 def new_job(folder: str, chat_id: str, schedule: str = "23:00") -> dict:
     folder_record = get_or_create_folder(folder)
     name = Path(folder).name or folder
+    project = load_project()
     return {
         "id": uuid.uuid4().hex[:12],
         "name": name,
@@ -100,7 +104,7 @@ def new_job(folder: str, chat_id: str, schedule: str = "23:00") -> dict:
         "chat_id": chat_id,
         "destination": "topic",
         "main_topic_id": folder_record.get("topic_id"),
-        "history_topic_id": folder_record.get("history_topic_id"),
+        "history_topic_id": project.get("history_topic_id"),
         "main_topic_name": folder_record.get("topic_name") or name,
         "history_topic_name": "Backup History",
         "schedule": schedule,
@@ -130,11 +134,12 @@ def normalize_job(job: dict) -> dict:
             update_folder(folder_record)
         elif folder_record.get("topic_id") and not job.get("main_topic_id"):
             job["main_topic_id"] = folder_record["topic_id"]
-        if not folder_record.get("history_topic_id") and job.get("history_topic_id"):
-            folder_record["history_topic_id"] = job["history_topic_id"]
-            update_folder(folder_record)
-        elif folder_record.get("history_topic_id") and not job.get("history_topic_id"):
-            job["history_topic_id"] = folder_record["history_topic_id"]
+        project = load_project()
+        if not project.get("history_topic_id") and job.get("history_topic_id"):
+            project["history_topic_id"] = job["history_topic_id"]
+            save_project(project)
+        elif project.get("history_topic_id") and not job.get("history_topic_id"):
+            job["history_topic_id"] = project["history_topic_id"]
     return job
 
 
