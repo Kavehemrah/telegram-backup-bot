@@ -21,13 +21,14 @@ A lightweight Windows-friendly desktop utility for backing up multiple local fol
 - Local manifest storing Telegram message IDs and file versions
 - Retry/backoff for transient Telegram/network failures
 - Protection against concurrent backup runs
+- PySide6 desktop UI with real dialogs for Chat and File selection
 
 ## Requirements
 
 - Python 3.10+
 - A Telegram bot token from `@BotFather`
 - `requests`
-- Tkinter (included with the standard Windows Python distribution)
+- `PySide6` 6.8+
 
 For Topic mode, the destination must be a Telegram forum supergroup. The bot needs permission to manage topics and message deletion if the live Topic should contain only the latest versions.
 
@@ -40,7 +41,7 @@ pip install -r requirements.txt
 python run_backup_ui.py
 ```
 
-`run_backup_ui.py` is the recommended desktop entry point. `backup_bot.py` contains the backup engine and Telegram operations.
+`run_backup_ui.py` is the recommended desktop entry point. `backup_ui.py` contains the PySide6 interface and `backup_bot.py` contains the backup engine and Telegram operations.
 
 ## Job configuration
 
@@ -89,7 +90,11 @@ The two switches are independent. Replace can be disabled while History remains 
 
 ## Selective backup
 
-Choose `Selected files` and use `انتخاب / مدیریت فایل‌ها`. The selection is stored with that Job. A new file appearing later is not included until it is explicitly selected.
+Choose `فایل‌های انتخابی` and use `انتخاب / مدیریت فایل‌ها`. A dedicated Qt dialog provides search, checkboxes, Select All, Clear All and an explicit confirmation button. The selection is stored with that Job. A new file appearing later is not included until it is explicitly selected.
+
+## Telegram chat selection
+
+`بارگذاری چت‌ها` reads available chats from Telegram `getUpdates`. When chats are found, the application opens a dedicated selectable dialog instead of silently choosing the first chat. The selected Chat ID is written back to the Job editor.
 
 ## Testing
 
