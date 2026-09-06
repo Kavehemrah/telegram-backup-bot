@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from backup_jobs import load_folders, normalize_folder
 from restore_catalog import record_uploaded_file
 
 
@@ -79,16 +80,37 @@ class TelegramForum:
         document_info = result.get("document") or {}
         file_id = document_info.get("file_id")
         if file_id and result.get("message_id") is not None:
-            record_uploaded_file(
-                chat_id=chat_id,
-                message_id=int(result["message_id"]),
-                file_id=str(file_id),
-                path=str(path),
-                relative_path=relative_path or path.name,
-                size=path.stat().st_size,
-                thread_id=thread_id,
-                topic_name=topic_name,
-            )
+            derived_relative = relative_path
+            derived_topic_name = topic_name
+            if derived_relative is None or derived_topic_name is None:
+                try:
+                    normalized_path = normalize_folder(str(path.parent))
+                    for folder in load_folders():
+                        folder_path = folder.get("path")
+                        if not folder_path:
+                            continue
+                        folder_root = Path(folder_path).resolve()
+                        try:
+                            derived_relative = str(path.resolve().relative_to(folder_root))
+                            if derived_topic_name is None:
+                                derived_topic_name = folder.get("topic_name")
+                            break
+                        except ValueError:
+                            continue
+                except OSError:
+                    pass
+            record_kwargs = {
+                "chat_id": chat_id,
+                "message_id": int(result["message_id"]),
+                "file_id": str(file_id),
+                "path": str(path),
+                "relative_path": derived_relative or path.name,
+                "size": path.stat().st_size,
+                "thread_id": thread_id,
+            }
+            if derived_topic_name:
+                record_kwargs["topic_name"] = str(derived_topic_name)
+            record_uploaded_file(**record_kwargs)
         return result
 
     def send_document_by_file_id(
