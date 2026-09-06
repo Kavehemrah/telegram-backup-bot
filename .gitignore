@@ -8,6 +8,8 @@ last_backup.json
 backup_history.json
 backup_jobs.json
 backup_manifest.json
+backup_folders.json
+backup_project.json
 
 # Python cache and tooling
 __pycache__/
