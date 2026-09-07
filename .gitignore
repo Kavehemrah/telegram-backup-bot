@@ -1,9 +1,17 @@
-# Secrets and local configuration
+# Environment / secrets
 .env
-.env.*
-!.env.example
 
-# Generated backup state
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Local runtime state
 last_backup.json
 backup_history.json
 backup_jobs.json
@@ -15,29 +23,3 @@ backup_restore_index.json
 
 # Local backup test folders
 backup-test*/
-
-# Python cache and tooling
-__pycache__/
-*.py[cod]
-*$py.class
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# Virtual environments
-.venv/
-venv/
-env/
-ENV/
-
-# Packaging and build output
-build/
-dist/
-*.egg-info/
-
-# Logs and local files
-*.log
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
