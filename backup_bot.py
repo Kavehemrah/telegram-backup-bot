@@ -44,6 +44,7 @@ STATE_FILES = {
     FOLDERS_FILE,
     PROJECT_FILE,
     ENV_FILE,
+    BASE_DIR / "backup_restore_index.json",
 }
 TELEGRAM_TIMEOUT = 30
 TELEGRAM_RETRIES = 3
