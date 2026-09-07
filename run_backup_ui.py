@@ -50,14 +50,16 @@ def _install_restore_tab() -> None:
             self.lang,
             self,
         )
-        tab_title = "بازیابی" if self.lang == "fa" else "Restore"
-        self.tabs.insertTab(2, self.restore_tab, tab_title)
-        self.tabs.setTabToolTip(2, "مرکز بازیابی فایل‌ها" if self.lang == "fa" else "Restore Center")
+        title = "بازیابی" if self.lang == "fa" else "Restore"
+        self.tabs.insertTab(2, self.restore_tab, title)
+        self.tabs.setTabToolTip(2, title)
 
     def apply_lang_with_restore(self: BackupApp) -> None:
         original_apply_lang(self)
         if hasattr(self, "restore_tab"):
-            self.tabs.setTabText(2, "بازیابی" if self.lang == "fa" else "Restore")
+            title = "بازیابی" if self.lang == "fa" else "Restore"
+            self.tabs.setTabText(2, title)
+            self.tabs.setTabToolTip(2, title)
             self.restore_tab.set_language(self.lang)
             self.restore_tab.refresh()
 
