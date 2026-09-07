@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 import restore
 import restore_catalog
@@ -42,6 +42,8 @@ class RestoreFileTests(unittest.TestCase):
         entry = {"file_id": "FILE123", "relative_path": "folder/a.txt"}
         telegram_file = {"file_path": "documents/file.bin", "file_size": 4}
         response = MagicMock()
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
         response.headers = {"Content-Length": "4"}
         response.iter_content.return_value = [b"test"]
 
