@@ -5,11 +5,25 @@
 __pycache__/
 *.py[cod]
 *.pyo
+*.class
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
 
 # IDE
 .vscode/
 .idea/
+
+# Packaging and build output
+build/
+dist/
+*.egg-info/
 
 # Local runtime state
 last_backup.json
@@ -23,3 +37,8 @@ backup_restore_index.json
 
 # Local backup test folders
 backup-test*/
+
+# Logs and local files
+*.log
+.DS_Store
+Thumbs.db
