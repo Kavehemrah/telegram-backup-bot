@@ -1,24 +1,11 @@
-# Secrets and local configuration
+# Environment / secrets
 .env
-.env.*
-!.env.example
 
-# Generated backup state
-last_backup.json
-backup_history.json
-backup_jobs.json
-backup_manifest.json
-backup_folders.json
-backup_project.json
-backup_ui_settings.json
-
-# Local backup test folders
-backup-test*/
-
-# Python cache and tooling
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
+*.pyo
+*.class
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -29,14 +16,29 @@ venv/
 env/
 ENV/
 
+# IDE
+.vscode/
+.idea/
+
 # Packaging and build output
 build/
 dist/
 *.egg-info/
 
+# Local runtime state
+last_backup.json
+backup_history.json
+backup_jobs.json
+backup_manifest.json
+backup_folders.json
+backup_project.json
+backup_ui_settings.json
+backup_restore_index.json
+
+# Local backup test folders
+backup-test*/
+
 # Logs and local files
 *.log
 .DS_Store
 Thumbs.db
-.vscode/
-.idea/
